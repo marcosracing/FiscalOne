@@ -117,8 +117,14 @@ def _parse_nfe(inf, filename, import_origin, trace_id, ns):
             if ncm:
                 ncms.append(ncm)
 
-    inf_adic = _find(inf, "infAdic", ns=ns)
-    xinf = _text(inf_adic, "xInfCpl", ns=ns) if inf_adic is not None else ""
+    inf_adic   = _find(inf, "infAdic", ns=ns)
+    xinf       = _text(inf_adic, "xInfCpl", ns=ns) if inf_adic is not None else ""
+
+    transp_el  = _find(inf, "transp", ns=ns)
+    transporta = transp_el.find(_t(ns, "transporta")) if transp_el is not None else None
+    transp_cnpj = re.sub(r"\D", "", _text(transporta, "CNPJ", ns=ns)) if transporta is not None else None
+    transp_nome = _text(transporta, "xNome", ns=ns) if transporta is not None else None
+    emit_cnae   = _text(emit, "CNAE", ns=ns) if emit is not None else None
 
     dh_emi = (_text(ide, "dhEmi", ns=ns) or _text(ide, "dEmi", ns=ns)) if ide is not None else ""
 
@@ -132,8 +138,11 @@ def _parse_nfe(inf, filename, import_origin, trace_id, ns):
         "serie":         _text(ide, "serie", ns=ns) if ide is not None else "",
         "emit_cnpj":     re.sub(r"\D", "", _text(emit, "CNPJ", ns=ns) if emit is not None else ""),
         "emit_nome":     _text(emit, "xNome", ns=ns) if emit is not None else "",
+        "emit_cnae":     emit_cnae or None,
         "dest_cnpj":     re.sub(r"\D", "", _text(dest, "CNPJ", ns=ns) if dest is not None else ""),
         "dest_nome":     _text(dest, "xNome", ns=ns) if dest is not None else "",
+        "transp_cnpj":   transp_cnpj or None,
+        "transp_nome":   transp_nome or None,
         "dh_emi_utc":    dh_emi[:19] if dh_emi else "",
         "valor_total":   _float(icms, "vNF", ns=ns) if icms is not None else 0.0,
         "valor_icms":    _float(icms, "vICMS", ns=ns) if icms is not None else 0.0,
