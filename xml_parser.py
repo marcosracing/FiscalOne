@@ -125,6 +125,8 @@ def _parse_nfe(inf, filename, import_origin, trace_id, ns):
     transp_cnpj = re.sub(r"\D", "", _text(transporta, "CNPJ", ns=ns)) if transporta is not None else None
     transp_nome = _text(transporta, "xNome", ns=ns) if transporta is not None else None
     emit_cnae   = _text(emit, "CNAE", ns=ns) if emit is not None else None
+    emit_end    = _find(emit, "enderEmit", ns=ns) if emit is not None else None
+    emit_ie     = _text(emit, "IE", ns=ns) if emit is not None else None
 
     dh_emi = (_text(ide, "dhEmi", ns=ns) or _text(ide, "dEmi", ns=ns)) if ide is not None else ""
 
@@ -138,8 +140,16 @@ def _parse_nfe(inf, filename, import_origin, trace_id, ns):
         "serie":         _text(ide, "serie", ns=ns) if ide is not None else "",
         "emit_cnpj":     re.sub(r"\D", "", _text(emit, "CNPJ", ns=ns) if emit is not None else ""),
         "emit_nome":     _text(emit, "xNome", ns=ns) if emit is not None else "",
-        "emit_cnae":     emit_cnae or None,
-        "dest_cnpj":     re.sub(r"\D", "", _text(dest, "CNPJ", ns=ns) if dest is not None else ""),
+        "emit_cnae":        emit_cnae or None,
+        "emit_ie":          emit_ie or None,
+        "emit_logradouro":  _text(emit_end, "xLgr",    ns=ns) if emit_end is not None else None,
+        "emit_numero":      _text(emit_end, "nro",     ns=ns) if emit_end is not None else None,
+        "emit_complemento": _text(emit_end, "xCpl",    ns=ns) if emit_end is not None else None,
+        "emit_bairro":      _text(emit_end, "xBairro", ns=ns) if emit_end is not None else None,
+        "emit_municipio":   _text(emit_end, "xMun",    ns=ns) if emit_end is not None else None,
+        "emit_uf":          _text(emit_end, "UF",      ns=ns) if emit_end is not None else None,
+        "emit_cep":         re.sub(r"\D", "", _text(emit_end, "CEP", ns=ns)) if emit_end is not None else None,
+        "dest_cnpj":        re.sub(r"\D", "", _text(dest, "CNPJ", ns=ns) if dest is not None else ""),
         "dest_nome":     _text(dest, "xNome", ns=ns) if dest is not None else "",
         "transp_cnpj":   transp_cnpj or None,
         "transp_nome":   transp_nome or None,
@@ -237,6 +247,8 @@ if __name__ == "__main__":
         assert r["xinf"] == "PLACA EFO9I83 KM 712181 MOTORISTA DIMAS", f"FALHA xinf: {r['xinf']}"
         assert r["import_origin"] == "fiscalone_upload", f"FALHA origin: {r['import_origin']}"
         assert r["trace_id"].startswith("fo-"), f"FALHA trace_id: {r['trace_id']}"
+        assert "emit_logradouro" in r, "FALHA: chave emit_logradouro ausente"
+        assert "emit_ie" in r, "FALHA: chave emit_ie ausente"
         print("OK autoteste NF-e — todos os campos corretos")
 
         # Teste PARSE_UNSUPPORTED
