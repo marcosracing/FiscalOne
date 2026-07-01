@@ -1,10 +1,16 @@
 """
-FiscalOne — Ponte técnica fiscal do ecossistema RLogix.
+FiscalOne — Gateway fiscal técnico do ecossistema RLogix. Fase 1 parcial.
 ADR-0035: gateway puro sem persistência própria.
-  - Parseia, assina, transmite, consulta serviços fiscais.
-  - Não persiste XML, protocolo, evento, cooldown ou certificado.
+
+Capacidade atual:
+  - Parseia XML/ZIP de NF-e, CT-e, MDF-e básico (POST /fiscal/documents/import).
+  - NÃO assina, NÃO transmite, NÃO consulta SEFAZ — providers são stubs.
+  - Busca ativa SEFAZ/DFe: stub (Fase 2 pendente).
+  - CT-e, MDF-e, cancelamento, eventos fiscais: honest-stub, retornam 501.
+  - Produção fiscal: bloqueada por padrão via flags duplas.
+  - Sem banco, sem XML raw, sem cooldown, sem certificado em repouso.
   - Toda persistência é responsabilidade da vertical (MapOne, CtrlOne).
-  - trace_id obrigatório em toda operação — propaga, não armazena.
+  - trace_id propaga em toda operação — não armazena.
 Porta: 5002
 """
 import os
@@ -19,6 +25,78 @@ from xml_parser import parse_xml
 app = Flask(__name__)
 
 FISCAL_PROVIDER = os.getenv("FISCAL_PROVIDER", "sefaz")
+_PROD_AMBIENTES = {"prod", "producao", "produção", "production"}
+_TRUE_VALUES = {"1", "true", "yes", "sim", "on"}
+
+def _ambiente():
+    return os.getenv("FISCALONE_AMBIENTE", "homologacao").strip().lower()
+
+def _flag(name):
+    return os.getenv(name, "").strip().lower() in _TRUE_VALUES
+
+def _producao_bloqueada():
+    if _ambiente() not in _PROD_AMBIENTES:
+        return False
+    return not (
+        _flag("FISCALONE_ENABLE_PRODUCAO")
+        and _flag("MAPONE_FISCAL_PRODUCAO_READY")
+    )
+
+def _bloqueio_producao(operacao, trace_id, source_system="desconhecido"):
+    _log_stdout(
+        operacao,
+        "bloqueado_producao",
+        trace_id,
+        source_system=source_system,
+        erro_msg="Ambiente de produção bloqueado até MapOne estar pronto e testado",
+    )
+    return jsonify({
+        "ok": False,
+        "trace_id": trace_id,
+        "codigo": "FISCALONE_PRODUCAO_BLOQUEADA",
+        "erro": (
+            "Operação fiscal em produção bloqueada. Use homologação até o MapOne "
+            "estar exaustivamente testado e as flags FISCALONE_ENABLE_PRODUCAO e "
+            "MAPONE_FISCAL_PRODUCAO_READY serem liberadas explicitamente."
+        ),
+        "ambiente": _ambiente(),
+        "required_flags": [
+            "FISCALONE_ENABLE_PRODUCAO=true",
+            "MAPONE_FISCAL_PRODUCAO_READY=true",
+        ],
+    }), 403
+
+def _provider_response(operacao, payload, status_padrao=501):
+    status = 200 if payload.get("ok") else status_padrao
+    return jsonify(payload), status
+
+def _emissao_nao_liberada(doc_type, trace_id, source_system="desconhecido"):
+    _log_stdout(
+        f"emitir_{doc_type}",
+        "bloqueado_validacoes",
+        trace_id,
+        source_system=source_system,
+        erro_msg="Emissão fiscal bloqueada até gates TMS estarem completos",
+    )
+    return jsonify({
+        "ok": False,
+        "trace_id": trace_id,
+        "codigo": "EMISSAO_FISCAL_NAO_LIBERADA",
+        "erro": (
+            f"Emissão de {doc_type.upper()} ainda não liberada. Testes devem ocorrer "
+            "somente em homologação; produção permanece bloqueada até validação "
+            "exaustiva do MapOne."
+        ),
+        "ambiente": _ambiente(),
+        "gates_obrigatorios": [
+            "CIOT quando aplicável",
+            "VPO / Vale-Pedágio Obrigatório",
+            "RNTRC / ANTT",
+            "seguro e averbação",
+            "documentos fiscais vinculados",
+            "veículo e condutor válidos",
+        ],
+    }), 501
 
 def get_provider():
     if FISCAL_PROVIDER == "focusnfe":
@@ -59,10 +137,24 @@ def _log_stdout(operacao, resultado, trace_id, **kwargs):
 @app.route("/fiscal/health")
 def health():
     return jsonify({
-        "ok":       True,
-        "provider": FISCAL_PROVIDER,
-        "version":  "0.3.0",
-        "adr":      "ADR-0035",
+        "ok":                  True,
+        "provider":            FISCAL_PROVIDER,
+        "ambiente":            _ambiente(),
+        "producao_bloqueada":  _producao_bloqueada(),
+        "fase":                "fase_1_parse_parcial",
+        "sefaz_ativo":         False,
+        "emissao_ativa":       False,
+        "persistencia_propria": False,
+        "capacidade": {
+            "parse_xml_zip":   True,
+            "gov_fetch":       False,
+            "emitir_cte":      False,
+            "emitir_mdfe":     False,
+            "consulta_sefaz":  False,
+            "certificado":     False,
+        },
+        "version":             "0.3.0",
+        "adr":                 "ADR-0035",
     })
 
 # ── POST /fiscal/documents/import ─────────────────────────────────────────────
@@ -161,6 +253,9 @@ def gov_fetch():
     trace_id      = _trace(request)
     source_system = request.headers.get("X-Source-System", "desconhecido")
 
+    if _producao_bloqueada():
+        return _bloqueio_producao("gov_fetch", trace_id, source_system)
+
     _log_stdout("gov_fetch", "stub", trace_id, source_system=source_system)
 
     return jsonify({
@@ -177,52 +272,91 @@ def gov_fetch():
 
 @app.route("/fiscal/sync/<cnpj>", methods=["POST"])
 def sync(cnpj):
-    return jsonify(get_provider().sync(cnpj))
+    trace_id = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+    if _producao_bloqueada():
+        return _bloqueio_producao("sync", trace_id, source_system)
+    return _provider_response("sync", get_provider().sync(cnpj))
 
 @app.route("/fiscal/nfe/<cnpj>")
 def listar_nfe(cnpj):
-    return jsonify(get_provider().listar_nfe(cnpj))
+    trace_id = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+    if _producao_bloqueada():
+        return _bloqueio_producao("listar_nfe", trace_id, source_system)
+    return _provider_response("listar_nfe", get_provider().listar_nfe(cnpj))
 
 @app.route("/fiscal/cte/<cnpj>")
 def listar_cte(cnpj):
-    return jsonify(get_provider().listar_cte(cnpj))
+    trace_id = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+    if _producao_bloqueada():
+        return _bloqueio_producao("listar_cte", trace_id, source_system)
+    return _provider_response("listar_cte", get_provider().listar_cte(cnpj))
 
 @app.route("/fiscal/nfe/chave/<chave>")
 def detalhe_nfe(chave):
-    return jsonify(get_provider().detalhe_nfe(chave))
+    trace_id = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+    if _producao_bloqueada():
+        return _bloqueio_producao("detalhe_nfe", trace_id, source_system)
+    return _provider_response("detalhe_nfe", get_provider().detalhe_nfe(chave))
 
 @app.route("/fiscal/cte/chave/<chave>")
 def detalhe_cte(chave):
-    return jsonify(get_provider().detalhe_cte(chave))
+    trace_id = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+    if _producao_bloqueada():
+        return _bloqueio_producao("detalhe_cte", trace_id, source_system)
+    return _provider_response("detalhe_cte", get_provider().detalhe_cte(chave))
 
 @app.route("/fiscal/cte", methods=["POST"])
 def emitir_cte():
-    return jsonify(get_provider().emitir_cte(
-        request.get_json(force=True) or {}))
+    trace_id = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+    if _producao_bloqueada():
+        return _bloqueio_producao("emitir_cte", trace_id, source_system)
+    return _emissao_nao_liberada("cte", trace_id, source_system)
 
 @app.route("/fiscal/mdfe", methods=["POST"])
 def emitir_mdfe():
-    return jsonify(get_provider().emitir_mdfe(
-        request.get_json(force=True) or {}))
+    trace_id = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+    if _producao_bloqueada():
+        return _bloqueio_producao("emitir_mdfe", trace_id, source_system)
+    return _emissao_nao_liberada("mdfe", trace_id, source_system)
 
 @app.route("/fiscal/mdfe/<chave>/encerrar", methods=["POST"])
 def encerrar_mdfe(chave):
-    return jsonify(get_provider().encerrar_mdfe(chave))
+    trace_id = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+    if _producao_bloqueada():
+        return _bloqueio_producao("encerrar_mdfe", trace_id, source_system)
+    return _emissao_nao_liberada("mdfe_encerramento", trace_id, source_system)
 
 @app.route("/fiscal/mdfe/<chave>/condutor", methods=["POST"])
 def incluir_condutor_mdfe(chave):
-    return jsonify(get_provider().incluir_condutor_mdfe(
-        chave, request.get_json(force=True) or {}))
+    trace_id = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+    if _producao_bloqueada():
+        return _bloqueio_producao("incluir_condutor_mdfe", trace_id, source_system)
+    return _emissao_nao_liberada("mdfe_condutor", trace_id, source_system)
 
 @app.route("/fiscal/cte/<chave>", methods=["DELETE"])
 def cancelar_cte(chave):
-    data = request.get_json(force=True) or {}
-    return jsonify(get_provider().cancelar_cte(
-        chave, data.get("justificativa", "")))
+    trace_id = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+    if _producao_bloqueada():
+        return _bloqueio_producao("cancelar_cte", trace_id, source_system)
+    return _emissao_nao_liberada("cte_cancelamento", trace_id, source_system)
 
 @app.route("/fiscal/status/<uf>")
 def status_sefaz(uf):
-    return jsonify(get_provider().status_sefaz(uf))
+    trace_id = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+    if _producao_bloqueada():
+        return _bloqueio_producao("status_sefaz", trace_id, source_system)
+    return _provider_response("status_sefaz", get_provider().status_sefaz(uf))
 
 if __name__ == "__main__":
     app.run(port=5002, debug=False)

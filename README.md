@@ -1,14 +1,55 @@
-# FiscalOne — Gateway Gov RLogix
+# FiscalOne — Gateway Fiscal Técnico RLogix
 
-Motor fiscal completo do ecossistema RLogix.
-Comunica SEFAZ, parseia documentos, emite CT-e/MDF-e.
+Gateway fiscal técnico do ecossistema RLogix — **Fase 1 parcial**.
+Parseia NF-e/CT-e/MDF-e localmente. SEFAZ, emissao e busca ativa sao stubs.
 
-## Provider pattern
+## Capacidade atual (2026-07-01)
 
-Trocar provider = trocar variavel de ambiente:
+| Funcionalidade | Status | Observacao |
+|---|---|---|
+| `POST /fiscal/documents/import` — parse XML/ZIP | operacional | NF-e, CT-e, MDF-e basico; sem persistencia propria |
+| `GET /fiscal/health` | operacional | Reporta fase, flags e stubs ativos |
+| Trava de producao (flags duplas) | operacional | Bloqueia toda operacao em prod sem flags |
+| `POST /fiscal/gov/fetch` — busca SEFAZ/DFe ativo | stub | Aguarda Fase 2 / migracao gov_import.py |
+| `POST /fiscal/sync/{cnpj}` — sync NF-e/CT-e | stub | SefazProvider nao migrado |
+| `GET /fiscal/nfe/{cnpj}`, `GET /fiscal/cte/{cnpj}` | stub | SefazProvider nao migrado |
+| `POST /fiscal/cte` — emitir CT-e | bloqueado | Nao implementado; retorna 501 |
+| `POST /fiscal/mdfe` — emitir MDF-e | bloqueado | Nao implementado; retorna 501 |
+| Cancelamento / encerramento / condutor | bloqueado | Retornam 501 |
+| `GET /fiscal/status/{uf}` — status SEFAZ por UF | stub | SefazProvider nao migrado |
+| Certificado digital / assinatura XML | nao existe | SefazProvider e stub; nenhuma assinatura real |
+| Persistencia propria (banco/XML raw/cooldown) | revogado | ADR-0035: zero persistencia propria |
+| FocusNFeProvider | nao existe | Stub; implementar quando necessario |
 
-    FISCAL_PROVIDER=sefaz      # Comunicacao direta SEFAZ (padrao)
-    FISCAL_PROVIDER=focusnfe   # Focus NF-e REST API
+## ADR-0035 — zero persistencia propria
+
+O FiscalOne nao tem banco, nao persiste XML raw, protocolo, evento, cooldown ou certificado.
+Toda persistencia e responsabilidade da vertical (MapOne, CtrlOne).
+trace_id propaga — nao armazena. Log vai para stdout; a vertical coleta se necessario.
+
+## Trava de seguranca fiscal
+
+O FiscalOne nasce em homologacao. Operacoes Gov.br, CT-e, MDF-e, cancelamento,
+encerramento, inclusao de condutor e consultas SEFAZ ficam bloqueadas em producao
+ate o MapOne estar exaustivamente testado.
+
+Padrao obrigatorio:
+
+    FISCALONE_AMBIENTE=homologacao
+    FISCALONE_ENABLE_PRODUCAO=false
+    MAPONE_FISCAL_PRODUCAO_READY=false
+
+Para qualquer uso futuro em producao, as duas flags precisam ser liberadas
+explicitamente e revisadas. MDF-e exige gates TMS antes de emissao: CIOT quando
+aplicavel, VPO/Vale-Pedagio Obrigatorio, RNTRC/ANTT, seguro/averbacao, documentos
+fiscais vinculados, veiculo e condutor validos.
+
+## Provider pattern (arquitetural — stubs hoje)
+
+Trocar provider = trocar variavel de ambiente (quando os providers estiverem implementados):
+
+    FISCAL_PROVIDER=sefaz      # SefazProvider — stub, aguarda migracao gov_import.py (ADR-0028)
+    FISCAL_PROVIDER=focusnfe   # FocusNFeProvider — stub, aguarda implementacao
 
 ## Rodar
 
@@ -22,22 +63,21 @@ Porta: 5002
 
 ## Endpoints
 
-| Metodo | Endpoint | Descricao |
-|--------|----------|-----------|
-| GET | /fiscal/health | Health check |
-| POST | /fiscal/sync/{cnpj} | Sync NF-e + CT-e |
-| GET | /fiscal/nfe/{cnpj} | Listar NF-es |
-| GET | /fiscal/cte/{cnpj} | Listar CT-es |
-| POST | /fiscal/cte | Emitir CT-e |
-| POST | /fiscal/mdfe | Emitir MDF-e |
-| DELETE | /fiscal/cte/{chave} | Cancelar CT-e |
+| Metodo | Endpoint | Status | Descricao |
+|--------|----------|--------|-----------|
+| GET | /fiscal/health | operacional | Health check, fase e flags |
+| POST | /fiscal/documents/import | operacional | Parse XML/ZIP sem persistencia |
+| POST | /fiscal/gov/fetch | stub | Busca SEFAZ/DFe — nao implementada |
+| POST | /fiscal/sync/{cnpj} | stub | Sync NF-e + CT-e — provider nao migrado |
+| GET | /fiscal/nfe/{cnpj} | stub | Listar NF-es — provider nao migrado |
+| GET | /fiscal/cte/{cnpj} | stub | Listar CT-es — provider nao migrado |
+| POST | /fiscal/cte | bloqueado | Emissao CT-e nao liberada (501) |
+| POST | /fiscal/mdfe | bloqueado | Emissao MDF-e nao liberada (501) |
+| DELETE | /fiscal/cte/{chave} | bloqueado | Cancelamento nao liberado (501) |
+| GET | /fiscal/status/{uf} | stub | Status SEFAZ — provider nao migrado |
 
 ## ADRs
 
 - MAP-0017 — FiscalOne Gateway Gov (MapOne)
 - ADR-0028 — Fronteira fiscal RLogix-wide (CtrlOne, a publicar)
-
-## Status
-
-- SefazProvider: STUB — aguarda migracao gov_import.py (ADR-0028)
-- FocusNFeProvider: STUB — implementar quando necessario
+- ADR-0035 — FiscalOne sem persistencia propria (gateway puro)
