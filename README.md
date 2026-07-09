@@ -1,14 +1,14 @@
 # FiscalOne — Gateway Fiscal Técnico RLogix
 
-Gateway fiscal técnico do ecossistema RLogix — **Fase 1 parcial**.
-Parseia NF-e/CT-e/MDF-e localmente. SEFAZ, emissao e busca ativa sao stubs.
+Gateway fiscal técnico do ecossistema RLogix — **Fase 1 · DFe recebidos**.
+Parseia NF-e/CT-e/MDF-e/NFS-e (XML e PDF) localmente. SEFAZ, emissao e busca ativa sao stubs.
 
-## Capacidade atual (2026-07-01)
+## Capacidade atual (2026-07-09)
 
 | Funcionalidade | Status | Observacao |
 |---|---|---|
-| `POST /fiscal/documents/import` — parse XML/ZIP | operacional | NF-e, CT-e, MDF-e basico; sem persistencia propria |
-| `GET /fiscal/health` | operacional | Reporta fase, flags e stubs ativos |
+| `POST /fiscal/documents/import` — parse XML/PDF/ZIP | operacional | NF-e, CT-e, MDF-e, NFS-e (nacional/ABRASF), NFS-e PDF (Prefeitura de SP + generico); sem persistencia propria |
+| `GET /fiscal/health` | operacional | Reporta fase, flags, capacidades e stubs ativos |
 | Trava de producao (flags duplas) | operacional | Bloqueia toda operacao em prod sem flags |
 | `POST /fiscal/gov/fetch` — busca SEFAZ/DFe ativo | stub | Aguarda Fase 2 / migracao gov_import.py |
 | `POST /fiscal/sync/{cnpj}` — sync NF-e/CT-e | stub | SefazProvider nao migrado |
@@ -66,7 +66,7 @@ Porta: 5002
 | Metodo | Endpoint | Status | Descricao |
 |--------|----------|--------|-----------|
 | GET | /fiscal/health | operacional | Health check, fase e flags |
-| POST | /fiscal/documents/import | operacional | Parse XML/ZIP sem persistencia |
+| POST | /fiscal/documents/import | operacional | Parse XML/PDF/ZIP sem persistencia |
 | POST | /fiscal/gov/fetch | stub | Busca SEFAZ/DFe — nao implementada |
 | POST | /fiscal/sync/{cnpj} | stub | Sync NF-e + CT-e — provider nao migrado |
 | GET | /fiscal/nfe/{cnpj} | stub | Listar NF-es — provider nao migrado |
@@ -75,6 +75,25 @@ Porta: 5002
 | POST | /fiscal/mdfe | bloqueado | Emissao MDF-e nao liberada (501) |
 | DELETE | /fiscal/cte/{chave} | bloqueado | Cancelamento nao liberado (501) |
 | GET | /fiscal/status/{uf} | stub | Status SEFAZ — provider nao migrado |
+
+## Documentos recebidos suportados (Fase 1)
+
+- XML:
+  - NF-e (`infNFe`) — layout nacional SEFAZ.
+  - CT-e (`infCte`) — layout nacional SEFAZ; resolve `tomador` via toma3/toma4.
+  - MDF-e (`infMDFe`) — chave e cabeçalho básico.
+  - NFS-e padrão nacional (`sped.fazenda.gov.br/nfse`, `infNFSe`/`DPS`).
+  - NFS-e ABRASF/municipal genérico (melhor esforço, `confianca=media`).
+  - Eventos (`infEvento`, ex.: cancelamento tpEvento 110111).
+- PDF (requer `pdfminer.six`):
+  - NFS-e Prefeitura de São Paulo capital (Identificador Nacional como
+    chave — pode ter mais de 44 dígitos e **não é truncado**).
+  - Fallback genérico por regex — `confianca=baixa`, marca `extra.revisar=true`.
+- ZIP: expandido internamente; aceita `.xml` e `.pdf` misturados.
+
+Se a chave canônica não estiver disponível, o parser gera uma chave estável:
+
+    nfse:{emit_cnpj}:{numero}:{dh_emi}:{valor_total}
 
 ## ADRs
 

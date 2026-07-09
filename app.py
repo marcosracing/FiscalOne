@@ -1,12 +1,13 @@
 """
-FiscalOne — Gateway fiscal técnico do ecossistema RLogix. Fase 1 parcial.
+FiscalOne — Gateway fiscal técnico do ecossistema RLogix. Fase 1 DFe recebidos.
 ADR-0035: gateway puro sem persistência própria.
 
 Capacidade atual:
-  - Parseia XML/ZIP de NF-e, CT-e, MDF-e básico (POST /fiscal/documents/import).
+  - Parseia XML/PDF/ZIP recebidos: NF-e, CT-e, MDF-e, NFS-e nacional/ABRASF
+    e NFS-e PDF Prefeitura de São Paulo (POST /fiscal/documents/import).
   - NÃO assina, NÃO transmite, NÃO consulta SEFAZ — providers são stubs.
   - Busca ativa SEFAZ/DFe: stub (Fase 2 pendente).
-  - CT-e, MDF-e, cancelamento, eventos fiscais: honest-stub, retornam 501.
+  - Emissão de CT-e, MDF-e, cancelamento, eventos fiscais: honest-stub, 501.
   - Produção fiscal: bloqueada por padrão via flags duplas.
   - Sem banco, sem XML raw, sem cooldown, sem certificado em repouso.
   - Toda persistência é responsabilidade da vertical (MapOne, CtrlOne).
@@ -20,7 +21,7 @@ import zipfile
 import io
 from flask import Flask, jsonify, request
 
-from xml_parser import parse_xml
+from xml_parser import parse_xml, parse_pdf, parse_document
 
 app = Flask(__name__)
 
@@ -141,19 +142,22 @@ def health():
         "provider":            FISCAL_PROVIDER,
         "ambiente":            _ambiente(),
         "producao_bloqueada":  _producao_bloqueada(),
-        "fase":                "fase_1_parse_parcial",
+        "fase":                "fase_1_dfe_recebidos",
         "sefaz_ativo":         False,
         "emissao_ativa":       False,
         "persistencia_propria": False,
         "capacidade": {
             "parse_xml_zip":   True,
+            "parse_pdf":       True,
+            "parse_nfse_xml":  True,
+            "parse_nfse_pdf":  True,
             "gov_fetch":       False,
             "emitir_cte":      False,
             "emitir_mdfe":     False,
             "consulta_sefaz":  False,
             "certificado":     False,
         },
-        "version":             "0.3.0",
+        "version":             "0.4.0",
         "adr":                 "ADR-0035",
     })
 
@@ -162,7 +166,7 @@ def health():
 @app.route("/fiscal/documents/import", methods=["POST"])
 def import_documents():
     """
-    Recebe XML/ZIP, parseia e retorna JSON normalizado.
+    Recebe XML, PDF ou ZIP com XML/PDF, parseia e retorna JSON normalizado.
     Não persiste nada — a vertical persiste no próprio banco.
     """
     trace_id      = _trace(request)
@@ -179,28 +183,32 @@ def import_documents():
             "erro":     "Nenhum arquivo enviado",
         }), 400
 
-    # Expandir ZIPs
-    raw = []
+    # Expandir ZIPs (XML e PDF internos)
+    raw = []  # cada item: (filename, data) ou (filename, None, erro)
     for f in files:
         fname = f.filename or ""
         data  = f.read()
-        if fname.lower().endswith(".zip"):
+        low   = fname.lower()
+        if low.endswith(".zip"):
             try:
                 with zipfile.ZipFile(io.BytesIO(data)) as z:
                     for name in z.namelist():
-                        if name.lower().endswith(".xml"):
-                            raw.append((name, z.read(name)))
+                        nlow = name.lower()
+                        if nlow.endswith(".xml") or nlow.endswith(".pdf"):
+                            raw.append((f"{fname}/{name}", z.read(name)))
             except Exception as e:
                 raw.append((fname, None, str(e)))
-        elif fname.lower().endswith(".xml"):
+        elif low.endswith(".xml") or low.endswith(".pdf"):
             raw.append((fname, data))
+        else:
+            raw.append((fname, None, "Extensão não suportada (aceita .xml, .pdf, .zip)"))
 
     if not raw:
         return jsonify({
             "ok":       False,
             "trace_id": trace_id,
             "codigo":   "PARSE_ERROR",
-            "erro":     "Nenhum XML encontrado nos arquivos enviados",
+            "erro":     "Nenhum XML/PDF encontrado nos arquivos enviados",
         }), 400
 
     results = []
@@ -216,7 +224,7 @@ def import_documents():
             })
             continue
 
-        parsed = parse_xml(
+        parsed = parse_document(
             data, fname,
             import_origin=import_origin,
             trace_id=trace_id,
