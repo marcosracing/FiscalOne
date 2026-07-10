@@ -349,13 +349,17 @@ def gov_fetch():
         "max_nsu":                  result.get("max_nsu"),
         "cooldown_recomendado_seg": result.get("cooldown_recomendado_seg"),
         "documentos":               result.get("documentos") or [],
+        "resumos":                  result.get("resumos") or [],
+        "erros":                    result.get("erros") or [],
+        "results":                  result.get("results") or [],
         "duracao_ms":               result.get("duracao_ms") or duracao_ms,
         "cert_fonte":               result.get("cert_fonte"),
         "erro":                     result.get("erro") if not result.get("ok") else None,
         "ambiente":                 (payload.get("ambiente") or "homologacao").lower(),
         "tipo":                     tipo,
     }
-    envelope = {k: v for k, v in envelope.items() if v is not None or k in ("documentos", "ok")}
+    _ARRAY_KEYS = ("documentos", "resumos", "erros", "results")
+    envelope = {k: v for k, v in envelope.items() if v is not None or k in _ARRAY_KEYS or k == "ok"}
 
     status = 200 if envelope["ok"] else _status_para_codigo(envelope.get("codigo"))
     return jsonify(envelope), status

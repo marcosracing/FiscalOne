@@ -127,6 +127,13 @@ def findall(el, name):
 
 def _detect_type_by_localnames(root) -> str:
     names = {localname(e.tag).lower() for e in root.iter()}
+    # Resumos SEFAZ Distribuicao DFe (nao sao layouts fiscais completos)
+    if "resnfe" in names:
+        return "resumo_nfe"
+    if "rescte" in names:
+        return "resumo_cte"
+    if "resevento" in names:
+        return "resumo_evento"
     if "tpevento" in names or "infevento" in names:
         return "evento"
     if "infcte" in names:
@@ -513,6 +520,102 @@ def _parse_nfse_abrasf(root, filename, import_origin, trace_id):
     }
 
 
+# ── Resumos DFe (SEFAZ Distribuicao) ─────────────────────────────────────────
+#
+# Layouts resNFe/resCTe/resEvento sao devolvidos pela SEFAZ quando o XML fiscal
+# completo ainda nao esta disponivel para o interessado (destinatario/tomador).
+# NAO sao layouts fiscais completos e NAO devem alimentar op_fiscal_xml como
+# documento oficial. MapOne deve persistir como pendencia operacional e
+# consultar chave-a-chave depois, quando o COMPLETO ficar disponivel.
+
+_RESUMO_MSG = "DFe resumido recebido; XML completo ainda nao disponivel."
+
+
+def _parse_resumo_nfe(root, filename, import_origin, trace_id):
+    r = first(root, "resNFe")
+    chave = only_digits(text(r, "chNFe"))
+    iso, ano, mes = parse_date(text(r, "dhEmi"))
+    return {
+        "ok":            False,
+        "codigo":        "RESUMO_DFE_RECEBIDO",
+        "erro":          _RESUMO_MSG,
+        "status_xml":    "RESUMO",
+        "trace_id":      trace_id,
+        "file":          filename,
+        "type":          "resumo_nfe",
+        "doc_type":      "nfe",
+        "chave":         chave or None,
+        "numero":        chave[25:34] if len(chave) == 44 else None,
+        "emit_cnpj":     only_digits(text(r, "CNPJ") or text(r, "CPF")),
+        "emit_nome":     text(r, "xNome"),
+        "dh_emi":        iso,
+        "ano":           ano,
+        "mes":           mes,
+        "valor_total":   num(r, "vNF"),
+        "cSitNFe":       text(r, "cSitNFe"),
+        "tpNF":          text(r, "tpNF"),
+        "dig_val":       text(r, "digVal"),
+        "confianca":     "alta" if chave else "baixa",
+        "import_origin": import_origin,
+        "extra":         {"origem": "sefaz-distribuicao-dfe-resumo"},
+    }
+
+
+def _parse_resumo_cte(root, filename, import_origin, trace_id):
+    r = first(root, "resCTe")
+    chave = only_digits(text(r, "chCTe"))
+    iso, ano, mes = parse_date(text(r, "dhEmi"))
+    return {
+        "ok":            False,
+        "codigo":        "RESUMO_DFE_RECEBIDO",
+        "erro":          _RESUMO_MSG,
+        "status_xml":    "RESUMO",
+        "trace_id":      trace_id,
+        "file":          filename,
+        "type":          "resumo_cte",
+        "doc_type":      "cte",
+        "chave":         chave or None,
+        "numero":        chave[25:34] if len(chave) == 44 else None,
+        "emit_cnpj":     only_digits(text(r, "CNPJ") or text(r, "CPF")),
+        "emit_nome":     text(r, "xNome"),
+        "dh_emi":        iso,
+        "ano":           ano,
+        "mes":           mes,
+        "valor_total":   num(r, "vTPrest"),
+        "cSitCTe":       text(r, "cSitCTe"),
+        "tpCTe":         text(r, "tpCTe"),
+        "dig_val":       text(r, "digVal"),
+        "confianca":     "alta" if chave else "baixa",
+        "import_origin": import_origin,
+        "extra":         {"origem": "sefaz-distribuicao-dfe-resumo"},
+    }
+
+
+def _parse_resumo_evento(root, filename, import_origin, trace_id):
+    r = first(root, "resEvento")
+    chave = only_digits(text(r, "chNFe") or text(r, "chCTe"))
+    tp = text(r, "tpEvento")
+    return {
+        "ok":            False,
+        "codigo":        "RESUMO_DFE_RECEBIDO",
+        "erro":          _RESUMO_MSG,
+        "status_xml":    "RESUMO",
+        "trace_id":      trace_id,
+        "file":          filename,
+        "type":          "resumo_evento",
+        "doc_type":      "evento",
+        "chave":         chave or None,
+        "chave_ref":     chave or "",
+        "tipo_evento":   tp,
+        "n_seq_evento":  text(r, "nSeqEvento"),
+        "dh_evento":     text(r, "dhEvento"),
+        "xevento":       text(r, "xEvento"),
+        "confianca":     "alta" if chave else "baixa",
+        "import_origin": import_origin,
+        "extra":         {"origem": "sefaz-distribuicao-dfe-resumo-evento"},
+    }
+
+
 # ── Eventos (cancelamento) ───────────────────────────────────────────────────
 
 def _parse_evento(root, filename, import_origin, trace_id):
@@ -772,19 +875,31 @@ def parse_xml(xml_bytes: bytes, filename: str = "",
             "confianca": "baixa",
         }
 
+    # Resumos DFe primeiro (nao sao layouts fiscais completos)
+    if tipo == "resumo_nfe":
+        return _parse_resumo_nfe(root, filename, import_origin, trace_id)
+    if tipo == "resumo_cte":
+        return _parse_resumo_cte(root, filename, import_origin, trace_id)
+    if tipo == "resumo_evento":
+        return _parse_resumo_evento(root, filename, import_origin, trace_id)
+
     if tipo == "nfe":
-        return _parse_nfe(root, filename, import_origin, trace_id)
-    if tipo == "cte":
-        return _parse_cte(root, filename, import_origin, trace_id)
-    if tipo == "mdfe":
-        return _parse_mdfe(root, filename, import_origin, trace_id)
-    if tipo == "evento":
-        return _parse_evento(root, filename, import_origin, trace_id)
-    # nfse
-    tag_root = getattr(root, "tag", "")
-    if "sped.fazenda.gov.br/nfse" in tag_root or first(root, "infNFSe") is not None:
-        return _parse_nfse_nacional(root, filename, import_origin, trace_id)
-    return _parse_nfse_abrasf(root, filename, import_origin, trace_id)
+        out = _parse_nfe(root, filename, import_origin, trace_id)
+    elif tipo == "cte":
+        out = _parse_cte(root, filename, import_origin, trace_id)
+    elif tipo == "mdfe":
+        out = _parse_mdfe(root, filename, import_origin, trace_id)
+    elif tipo == "evento":
+        out = _parse_evento(root, filename, import_origin, trace_id)
+    else:
+        tag_root = getattr(root, "tag", "")
+        if "sped.fazenda.gov.br/nfse" in tag_root or first(root, "infNFSe") is not None:
+            out = _parse_nfse_nacional(root, filename, import_origin, trace_id)
+        else:
+            out = _parse_nfse_abrasf(root, filename, import_origin, trace_id)
+    if isinstance(out, dict) and out.get("ok"):
+        out.setdefault("status_xml", "COMPLETO")
+    return out
 
 
 def parse_pdf(pdf_bytes: bytes, filename: str = "",

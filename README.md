@@ -119,20 +119,49 @@ Resposta (ok=true):
       "ultimo_nsu": "000000000000123",
       "max_nsu": "000000000000200",
       "cooldown_recomendado_seg": 0,
-      "documentos": [
+      "documentos": [ /* COMPLETO: nfeProc/cteProc */
         {
+          "status_xml": "COMPLETO",
           "doc_type": "nfe", "chave": "...", "numero": "...",
           "emit_cnpj": "...", "emit_nome": "...", "dest_cnpj": "...",
           "dh_emi": "2026-06-27", "valor_total": 1234.56,
           "xml_bruto": "<xml completo>",
           "xml_hash_sha256": "...",
           "parser_version": "fiscalone_xml_parser",
-          "nsu": "...", "schema": "..."
+          "nsu": "...", "schema": "procNFe_v4.00"
         }
+      ],
+      "resumos": [ /* RESUMO: resNFe/resCTe/resEvento — XML fiscal completo NAO disponivel */
+        {
+          "status_xml": "RESUMO",
+          "codigo": "RESUMO_DFE_RECEBIDO",
+          "doc_type": "nfe", "chave": "...", "emit_cnpj": "...",
+          "emit_nome": "...", "dh_emi": "...", "valor_total": 256.51,
+          "cSitNFe": "1", "tpNF": "1",
+          "nsu": "...", "schema": "resNFe_v1.01"
+        }
+      ],
+      "erros": [ /* docZip nao classificavel: schema desconhecido ou decode falhou */
+        {"nsu": "...", "schema": "...", "codigo": "PARSE_UNSUPPORTED_DFE",
+         "erro": "..."}
+      ],
+      "results": [ /* view unificada (compat MapOne): documentos + resumos + erros */
+        {"...campos...", "categoria": "COMPLETO"|"RESUMO"|"ERRO"}
       ],
       "cert_fonte": "inline_base64",
       "duracao_ms": 1250
     }
+
+**RESUMO x COMPLETO** — a SEFAZ pode devolver, no mesmo lote:
+
+- COMPLETO (`procNFe_v4.00`, `procCTe_v4.00`) — XML fiscal integral; entra em `documentos`.
+- RESUMO (`resNFe_v1.01`, `resCTe_v1.00`, `resEvento_v1.01`) — apenas metadados
+  (chave, emit, dhEmi, valor); entra em `resumos` com `codigo=RESUMO_DFE_RECEBIDO`.
+  MapOne deve persistir como **pendencia operacional**, nao como documento fiscal.
+  Quando o COMPLETO ficar disponivel, o mesmo NSU (ou posterior) virá com
+  `procNFe`/`procCTe` — a vertical fecha a pendencia.
+
+**RESUMO nao e erro de layout** — nao vira `PARSE_UNSUPPORTED`.
 
 Erros controlados (nunca traceback HTML):
 

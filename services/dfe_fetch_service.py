@@ -245,26 +245,33 @@ def fetch_dfe(cert_pem, key_pem, cnpj, tipo, ambiente, ultimo_nsu, trace_id,
     elif cstat == "589":
         cooldown = _COOLDOWN_589
 
-    documentos = []
+    documentos, resumos, erros = [], [], []
     if cstat == "138":
         for dz in [el for el in root.iter() if _lname(el.tag) == "docZip"]:
+            nsu    = dz.get("NSU")
+            schema = dz.get("schema") or ""
             try:
                 xml = gzip.decompress(
                     base64.b64decode(dz.text or "")
                 ).decode("utf-8", "replace")
             except Exception:
-                continue
-            schema = (dz.get("schema") or "").lower()
-            low    = xml.lower()
-            # so processa documentos completos NF-e / CT-e (nao resumo, nao evento)
-            if not ("<infnfe" in low or "<infcte" in low):
+                erros.append({
+                    "ok":         False,
+                    "nsu":        nsu,
+                    "schema":     schema,
+                    "codigo":     "DOCZIP_DECODE_FALHOU",
+                    "erro":       "Falha ao descompactar/decodificar docZip",
+                    "status_xml": "ERRO",
+                })
                 continue
 
             parsed = _parse_doc(xml, trace_id)
-            if not parsed.get("ok"):
-                continue
+            status_xml = parsed.get("status_xml")  # COMPLETO ou RESUMO
+            codigo     = parsed.get("codigo")
 
-            doc = {
+            item_base = {
+                "nsu":              nsu,
+                "schema":           schema,
                 "doc_type":         parsed.get("doc_type"),
                 "chave":            parsed.get("chave"),
                 "numero":           parsed.get("numero"),
@@ -275,12 +282,40 @@ def fetch_dfe(cert_pem, key_pem, cnpj, tipo, ambiente, ultimo_nsu, trace_id,
                 "valor_total":      parsed.get("valor_total"),
                 "xml_hash_sha256":  _sha256(xml),
                 "parser_version":   parsed.get("parser_version") or "fiscalone_xml_parser",
-                "nsu":              dz.get("NSU"),
-                "schema":           dz.get("schema"),
+                "status_xml":       status_xml,
             }
-            if incluir_xml_bruto:
-                doc["xml_bruto"] = xml
-            documentos.append(doc)
+
+            if parsed.get("ok") and status_xml == "COMPLETO":
+                if incluir_xml_bruto:
+                    item_base["xml_bruto"] = xml
+                documentos.append(item_base)
+            elif codigo == "RESUMO_DFE_RECEBIDO":
+                item_base["status_xml"] = "RESUMO"
+                item_base["codigo"]     = "RESUMO_DFE_RECEBIDO"
+                # campos extras uteis so em resumo
+                for k in ("cSitNFe", "cSitCTe", "tpNF", "tpCTe", "tipo_evento",
+                         "n_seq_evento", "dh_evento", "xevento", "chave_ref"):
+                    v = parsed.get(k)
+                    if v is not None and v != "":
+                        item_base[k] = v
+                if incluir_xml_bruto:
+                    item_base["xml_bruto"] = xml
+                resumos.append(item_base)
+            else:
+                erros.append({
+                    "ok":         False,
+                    "nsu":        nsu,
+                    "schema":     schema,
+                    "codigo":     codigo or "PARSE_UNSUPPORTED_DFE",
+                    "erro":       parsed.get("erro") or "Layout de docZip nao suportado",
+                    "status_xml": "ERRO",
+                })
+
+    # results[] unificado (compatibilidade — cada item traz status_xml)
+    results = []
+    for d in documentos: results.append({**d, "categoria": "COMPLETO"})
+    for r in resumos:    results.append({**r, "categoria": "RESUMO"})
+    for e in erros:      results.append({**e, "categoria": "ERRO"})
 
     return {
         "ok":                       True,
@@ -290,5 +325,8 @@ def fetch_dfe(cert_pem, key_pem, cnpj, tipo, ambiente, ultimo_nsu, trace_id,
         "max_nsu":                  max_nsu,
         "cooldown_recomendado_seg": cooldown,
         "documentos":               documentos,
+        "resumos":                  resumos,
+        "erros":                    erros,
+        "results":                  results,
         "duracao_ms":               duracao_ms,
     }

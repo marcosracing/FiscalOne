@@ -24,6 +24,35 @@ responsabilidade da vertical. FiscalOne mantem o zero-persistencia da ADR-0035.
     /xml_parser.py                   Parseia NF-e/CT-e/MDF-e/NFS-e (recebidos)
     /app.py                          HTTP: /fiscal/health, /documents/import, /gov/fetch
 
+## 3a. RESUMO x COMPLETO (Distribuicao DFe)
+
+Cada `docZip` retornado pela SEFAZ na `NFeDistDFeInteresse` /
+`CTeDistDFeInteresse` pode ser um de tres layouts:
+
+| Categoria | Schema tipico            | Conteudo             | Alocado em      |
+|-----------|--------------------------|----------------------|-----------------|
+| COMPLETO  | procNFe_v4.00, procCTe_v4.00 | XML fiscal integral | `documentos[]`  |
+| RESUMO    | resNFe_v1.01, resCTe_v1.00, resEvento_v1.01 | so metadados | `resumos[]`     |
+| ERRO      | schema desconhecido / decode falhou | -                    | `erros[]`       |
+
+**Regras:**
+
+- RESUMO nao e erro de layout. NAO retornar `PARSE_UNSUPPORTED`.
+- RESUMO retorna `ok:false, codigo:"RESUMO_DFE_RECEBIDO", status_xml:"RESUMO"`,
+  com chave, emit_cnpj, emit_nome, dh_emi, valor_total e (quando presente)
+  cSitNFe/cSitCTe, tpNF/tpCTe, digVal.
+- Um COMPLETO retorna `ok:true, status_xml:"COMPLETO"`.
+- Cada resposta traz `documentos + resumos + erros + results` (results unificado
+  para compatibilidade com MapOne, sempre com `categoria` e `status_xml`).
+
+**Persistencia (MapOne):**
+
+- COMPLETO → `op_fiscal_xml` como documento fiscal oficial (xml_bruto + hash).
+- RESUMO → tabela de pendencias operacionais (ex.: `op_dfe_resumo_pendente`)
+  com chave + emit + valor. Nao alimenta `op_fiscal_xml` como documento
+  completo. Quando o COMPLETO vier em NSU posterior, fecha a pendencia.
+- ERRO → registrar em log/incidente; nao bloquear o drain do NSU.
+
 ## 3. POST /fiscal/gov/fetch — fluxo interno
 
     Vertical (MapOne)
