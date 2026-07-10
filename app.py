@@ -254,27 +254,123 @@ def import_documents():
 @app.route("/fiscal/gov/fetch", methods=["POST"])
 def gov_fetch():
     """
-    Busca ativa DFe na SEFAZ/Nacional.
-    Stub até Fase 2 (migração gov_import.py do CtrlOne — ADR-0034).
-    Cooldown recomendado devolvido no envelope — vertical persiste se necessário.
+    Busca ativa DFe na SEFAZ (NF-e / CT-e — NFeDistDFeInteresse / CTeDistDFeInteresse).
+
+    Gateway puro (ADR-0035): nao persiste NSU, XML ou cooldown.
+    Certificado A1 vem por requisicao (cert_pfx_base64+cert_password) ou via env
+    (fallback homologacao). Descartado ao final da chamada.
+
+    Payload:
+      cnpj_tenant, ambiente ("producao"|"homologacao"), tipo ("nfe"|"cte"),
+      ultimo_nsu, cert_pfx_base64 (opcional), cert_password (opcional),
+      cert_source (opcional: "inline_base64"|"env").
+
+    Sempre devolve JSON — nunca traceback HTML.
     """
     trace_id      = _trace(request)
     source_system = request.headers.get("X-Source-System", "desconhecido")
+    t0            = time.monotonic()
 
     if _producao_bloqueada():
         return _bloqueio_producao("gov_fetch", trace_id, source_system)
 
-    _log_stdout("gov_fetch", "stub", trace_id, source_system=source_system)
+    try:
+        payload = request.get_json(silent=True) or {}
+    except Exception:
+        payload = {}
 
-    return jsonify({
-        "ok":       False,
-        "trace_id": trace_id,
-        "codigo":   "ADR_0034_FASE_2_PENDENTE",
-        "erro":     "Busca SEFAZ não implementada — aguarda Fase 2 (migração gov_import.py do CtrlOne)",
-        "adr":      "ADR-0034",
-        "fase":     "2.1",
-        "cooldown_recomendado_seg": None,
-    }), 501
+    if not isinstance(payload, dict) or not payload:
+        _log_stdout("gov_fetch", "erro", trace_id,
+                    source_system=source_system,
+                    erro_msg="payload JSON ausente ou invalido")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "PAYLOAD_INVALIDO",
+            "erro":     "Payload JSON obrigatorio (cnpj_tenant, ambiente, tipo, ultimo_nsu)",
+        }), 400
+
+    cnpj_tenant = (payload.get("cnpj_tenant") or "").strip()
+    tipo        = (payload.get("tipo") or "").strip().lower()
+
+    if not cnpj_tenant or len(cnpj_tenant.replace(".", "").replace("/", "").replace("-", "")) < 14:
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "CNPJ_INVALIDO",
+            "erro":     "cnpj_tenant obrigatorio (14 digitos)",
+        }), 400
+
+    if tipo not in ("nfe", "cte"):
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "TIPO_NAO_SUPORTADO",
+            "erro":     "tipo obrigatorio: 'nfe' ou 'cte'",
+        }), 400
+
+    try:
+        provider = get_provider()
+        if not hasattr(provider, "gov_fetch"):
+            return jsonify({
+                "ok":       False,
+                "trace_id": trace_id,
+                "codigo":   "PROVIDER_SEM_GOV_FETCH",
+                "erro":     f"Provider {FISCAL_PROVIDER} nao implementa gov_fetch",
+            }), 501
+        result = provider.gov_fetch(payload, trace_id)
+    except Exception as e:
+        # Nao vaza traceback nem stack — apenas tipo de erro
+        _log_stdout("gov_fetch", "erro", trace_id,
+                    source_system=source_system,
+                    erro_msg=f"{type(e).__name__}: excecao interna")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "ERRO_INTERNO",
+            "erro":     "Erro interno ao consultar SEFAZ — verifique logs do FiscalOne",
+        }), 500
+
+    duracao_ms = int((time.monotonic() - t0) * 1000)
+    resultado_log = "ok" if result.get("ok") else "erro"
+    _log_stdout("gov_fetch", resultado_log, trace_id,
+                source_system=source_system,
+                company_cnpj=cnpj_tenant, doc_type=tipo,
+                duracao_ms=duracao_ms,
+                erro_msg=result.get("codigo") if not result.get("ok") else None)
+
+    envelope = {
+        "ok":                       bool(result.get("ok")),
+        "trace_id":                 trace_id,
+        "codigo":                   result.get("codigo"),
+        "cstat":                    result.get("cstat"),
+        "xmotivo":                  result.get("xmotivo"),
+        "ultimo_nsu":               result.get("ultimo_nsu"),
+        "max_nsu":                  result.get("max_nsu"),
+        "cooldown_recomendado_seg": result.get("cooldown_recomendado_seg"),
+        "documentos":               result.get("documentos") or [],
+        "duracao_ms":               result.get("duracao_ms") or duracao_ms,
+        "cert_fonte":               result.get("cert_fonte"),
+        "erro":                     result.get("erro") if not result.get("ok") else None,
+        "ambiente":                 (payload.get("ambiente") or "homologacao").lower(),
+        "tipo":                     tipo,
+    }
+    envelope = {k: v for k, v in envelope.items() if v is not None or k in ("documentos", "ok")}
+
+    status = 200 if envelope["ok"] else _status_para_codigo(envelope.get("codigo"))
+    return jsonify(envelope), status
+
+
+def _status_para_codigo(codigo):
+    """Mapeia codigo de erro controlado -> HTTP status."""
+    if codigo in ("CERT_NAO_CONFIGURADO", "CERT_CNPJ_DIVERGENTE",
+                  "CERT_ABERTURA_FALHOU", "CERT_BASE64_INVALIDO",
+                  "CERT_INVALIDO", "CERT_ENV_INVALIDO",
+                  "CERT_SEM_CNPJ", "CERT_FONTE_NAO_SUPORTADA"):
+        return 400
+    if codigo in ("SEFAZ_INDISPONIVEL", "SEFAZ_HTTP_ERRO", "SEFAZ_XML_INVALIDO", "TLS_ERRO"):
+        return 502
+    return 500
 
 # ── Rotas legadas (provider pattern — mantidas, stubs) ────────────────────────
 

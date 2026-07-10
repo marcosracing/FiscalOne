@@ -10,7 +10,7 @@ Parseia NF-e/CT-e/MDF-e/NFS-e (XML e PDF) localmente. SEFAZ, emissao e busca ati
 | `POST /fiscal/documents/import` — parse XML/PDF/ZIP | operacional | NF-e, CT-e, MDF-e, NFS-e (nacional/ABRASF), NFS-e PDF (Prefeitura de SP + generico); sem persistencia propria |
 | `GET /fiscal/health` | operacional | Reporta fase, flags, capacidades e stubs ativos |
 | Trava de producao (flags duplas) | operacional | Bloqueia toda operacao em prod sem flags |
-| `POST /fiscal/gov/fetch` — busca SEFAZ/DFe ativo | stub | Aguarda Fase 2 / migracao gov_import.py |
+| `POST /fiscal/gov/fetch` — busca SEFAZ/DFe ativo | operacional (fase 1 · NF-e/CT-e por pagina) | Gateway puro; cert A1 por requisicao |
 | `POST /fiscal/sync/{cnpj}` — sync NF-e/CT-e | stub | SefazProvider nao migrado |
 | `GET /fiscal/nfe/{cnpj}`, `GET /fiscal/cte/{cnpj}` | stub | SefazProvider nao migrado |
 | `POST /fiscal/cte` — emitir CT-e | bloqueado | Nao implementado; retorna 501 |
@@ -67,7 +67,7 @@ Porta: 5002
 |--------|----------|--------|-----------|
 | GET | /fiscal/health | operacional | Health check, fase e flags |
 | POST | /fiscal/documents/import | operacional | Parse XML/PDF/ZIP sem persistencia |
-| POST | /fiscal/gov/fetch | stub | Busca SEFAZ/DFe — nao implementada |
+| POST | /fiscal/gov/fetch | operacional | Busca SEFAZ NF-e/CT-e (NFeDistDFeInteresse) por pagina, sem persistencia |
 | POST | /fiscal/sync/{cnpj} | stub | Sync NF-e + CT-e — provider nao migrado |
 | GET | /fiscal/nfe/{cnpj} | stub | Listar NF-es — provider nao migrado |
 | GET | /fiscal/cte/{cnpj} | stub | Listar CT-es — provider nao migrado |
@@ -95,8 +95,70 @@ Se a chave canônica não estiver disponível, o parser gera uma chave estável:
 
     nfse:{emit_cnpj}:{numero}:{dh_emi}:{valor_total}
 
+## POST /fiscal/gov/fetch — contrato
+
+Gateway puro (ADR-0035). Sem persistencia de NSU/XML/cooldown.
+
+Payload:
+
+    {
+      "cnpj_tenant":       "07219398000109",
+      "ambiente":          "homologacao",     // ou "producao"
+      "tipo":              "nfe",             // ou "cte"
+      "ultimo_nsu":        "000000000000000",
+      "cert_source":       "inline_base64",   // ou "env" (fallback homologacao)
+      "cert_pfx_base64":   "<PFX em base64>",
+      "cert_password":     "<senha do PFX>"
+    }
+
+Resposta (ok=true):
+
+    {
+      "ok": true, "trace_id": "fo-...",
+      "cstat": "138", "xmotivo": "Documentos localizados",
+      "ultimo_nsu": "000000000000123",
+      "max_nsu": "000000000000200",
+      "cooldown_recomendado_seg": 0,
+      "documentos": [
+        {
+          "doc_type": "nfe", "chave": "...", "numero": "...",
+          "emit_cnpj": "...", "emit_nome": "...", "dest_cnpj": "...",
+          "dh_emi": "2026-06-27", "valor_total": 1234.56,
+          "xml_bruto": "<xml completo>",
+          "xml_hash_sha256": "...",
+          "parser_version": "fiscalone_xml_parser",
+          "nsu": "...", "schema": "..."
+        }
+      ],
+      "cert_fonte": "inline_base64",
+      "duracao_ms": 1250
+    }
+
+Erros controlados (nunca traceback HTML):
+
+- 400 CERT_NAO_CONFIGURADO, CERT_BASE64_INVALIDO, CERT_ABERTURA_FALHOU,
+      CERT_CNPJ_DIVERGENTE, CERT_SEM_CNPJ, CERT_INVALIDO, CERT_ENV_INVALIDO
+- 400 CNPJ_INVALIDO, TIPO_NAO_SUPORTADO, PAYLOAD_INVALIDO
+- 403 FISCALONE_PRODUCAO_BLOQUEADA (flags duplas)
+- 502 SEFAZ_INDISPONIVEL, SEFAZ_HTTP_ERRO, SEFAZ_XML_INVALIDO, TLS_ERRO
+- 500 ERRO_INTERNO
+
+Cooldown recomendado (segundos): SEFAZ cStat 656 → 3900 · cStat 137 → 3600 · 138 → 0.
+A vertical decide como persistir/repeitar.
+
+## Certificado A1
+
+Em transito, nunca em repouso. FiscalOne:
+
+- Recebe PFX em base64 + senha na requisicao (`cert_pfx_base64` + `cert_password`)
+- Ou lê `GOV_CERT_PATH` + `GOV_CERT_PASSWORD` (fallback local homologacao)
+- Descarta o bundle apos a chamada (`cert_provider.wipe`)
+- PEM temporario: chmod 600, unlink imediato apos `ssl.load_cert_chain`
+- Verifica se o CNPJ ICP-Brasil no cert bate com o `cnpj_tenant`
+
 ## ADRs
 
 - MAP-0017 — FiscalOne Gateway Gov (MapOne)
 - ADR-0028 — Fronteira fiscal RLogix-wide (CtrlOne, a publicar)
+- ADR-0034 — Gateway DFe (busca ativa)
 - ADR-0035 — FiscalOne sem persistencia propria (gateway puro)
