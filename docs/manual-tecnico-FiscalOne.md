@@ -79,9 +79,14 @@ Cada `docZip` retornado pela SEFAZ na `NFeDistDFeInteresse` /
 
 ## 4. Certificado A1
 
-- **Fonte preferida (producao):** `cert_pfx_base64` + `cert_password` no payload.
-- **Fallback (homologacao local):** `GOV_CERT_PATH` + `GOV_CERT_PASSWORD` no .env.
-- **Nunca:** disco permanente, banco proprio, log.
+Fontes aceitas, em ordem:
+
+  1. `cert_pfx_base64` + `cert_password` no payload  (padrao producao)
+  2. `FISCALONE_CERT_PFX_BASE64` + `FISCALONE_CERT_PASSWORD` (env — teste controlado)
+  3. `FISCALONE_CERT_PFX_PATH`   + `FISCALONE_CERT_PASSWORD` (env — teste controlado)
+  4. `GOV_CERT_PATH` + `GOV_CERT_PASSWORD` (compat legado)
+
+- **Nunca:** disco permanente, banco proprio, log de segredo.
 - **Integridade:** CNPJ ICP-Brasil (SAN OID 2.16.76.1.3.3 ou CN "RAZAO:CNPJ")
   precisa bater com `cnpj_tenant`. Se divergir → CERT_CNPJ_DIVERGENTE.
 - **PEM temporario:** gravado com chmod 600, apagado em `finally` logo apos
@@ -105,14 +110,41 @@ A vertical (MapOne) e quem grava `proxima_consulta_utc` na sua tabela
     ambiente="producao"    → tpAmb=1 · www1.nfe.fazenda.gov.br / www1.cte.fazenda.gov.br
     ambiente="homologacao" → tpAmb=2 · hom1.nfe.fazenda.gov.br / hom1.cte.fazenda.gov.br
 
-## 7. Trava de producao (flags duplas)
+## 7. Trava de producao — 3 flags + emissao bloqueada por design
 
-    FISCALONE_AMBIENTE=homologacao          # padrao
-    FISCALONE_ENABLE_PRODUCAO=false         # precisa liberar explicitamente
-    MAPONE_FISCAL_PRODUCAO_READY=false      # gate da vertical dona
+Producao liberada APENAS para DFe recebido. Requer as **tres** flags em `1`:
 
-Ambas precisam estar `true` para liberar producao. Enquanto false, o endpoint
-retorna 403 `FISCALONE_PRODUCAO_BLOQUEADA` sem consultar SEFAZ.
+    FISCALONE_AMBIENTE=producao
+    FISCALONE_ENABLE_PRODUCAO=1
+    MAPONE_FISCAL_PRODUCAO_READY=1
+    FISCALONE_DFE_RECEBIDO_ONLY=1
+
+Enquanto qualquer flag estiver ausente/`0`, `/fiscal/gov/fetch` retorna
+**403 FISCALONE_PRODUCAO_BLOQUEADA** com `flags_faltantes[]` no envelope.
+
+**Emissao permanece bloqueada por design (`bloquear_emissao`)** mesmo com
+as tres flags ligadas. As rotas abaixo sempre devolvem
+**403 EMISSAO_BLOQUEADA**, independente do ambiente/flags:
+
+    POST   /fiscal/nfe
+    POST   /fiscal/cte
+    POST   /fiscal/mdfe
+    DELETE /fiscal/nfe/<chave>
+    DELETE /fiscal/cte/<chave>
+    POST   /fiscal/nfe/<chave>/inutilizar
+    POST   /fiscal/nfe/<chave>/cce
+    POST   /fiscal/mdfe/<chave>/encerrar
+    POST   /fiscal/mdfe/<chave>/condutor
+
+Envelope de bloqueio:
+
+    {
+      "ok": false,
+      "codigo": "EMISSAO_BLOQUEADA",
+      "erro": "FiscalOne liberado apenas para DFe recebido; emissao fiscal permanece bloqueada.",
+      "escopo_liberado": "dfe_recebido_apenas",
+      "trace_id": "fo-..."
+    }
 
 ## 8. Contrato do envelope de erro
 

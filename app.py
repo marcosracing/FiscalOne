@@ -35,69 +35,68 @@ def _ambiente():
 def _flag(name):
     return os.getenv(name, "").strip().lower() in _TRUE_VALUES
 
+_REQUIRED_PRODUCAO_FLAGS = (
+    "FISCALONE_ENABLE_PRODUCAO",
+    "MAPONE_FISCAL_PRODUCAO_READY",
+    "FISCALONE_DFE_RECEBIDO_ONLY",
+)
+
 def _producao_bloqueada():
+    """
+    Producao liberada APENAS para DFe recebido, e apenas com as tres flags.
+    FISCALONE_DFE_RECEBIDO_ONLY torna a autorizacao explicita: nao ha uso
+    generalista de producao — so consulta/recepcao DFe.
+    """
     if _ambiente() not in _PROD_AMBIENTES:
         return False
-    return not (
-        _flag("FISCALONE_ENABLE_PRODUCAO")
-        and _flag("MAPONE_FISCAL_PRODUCAO_READY")
-    )
+    return not all(_flag(f) for f in _REQUIRED_PRODUCAO_FLAGS)
 
 def _bloqueio_producao(operacao, trace_id, source_system="desconhecido"):
+    faltantes = [f for f in _REQUIRED_PRODUCAO_FLAGS if not _flag(f)]
     _log_stdout(
         operacao,
         "bloqueado_producao",
         trace_id,
         source_system=source_system,
-        erro_msg="Ambiente de produção bloqueado até MapOne estar pronto e testado",
+        erro_msg=f"producao_bloqueada · flags faltantes: {','.join(faltantes) or 'nenhuma'}",
     )
     return jsonify({
         "ok": False,
         "trace_id": trace_id,
         "codigo": "FISCALONE_PRODUCAO_BLOQUEADA",
         "erro": (
-            "Operação fiscal em produção bloqueada. Use homologação até o MapOne "
-            "estar exaustivamente testado e as flags FISCALONE_ENABLE_PRODUCAO e "
-            "MAPONE_FISCAL_PRODUCAO_READY serem liberadas explicitamente."
+            "Operacao em producao bloqueada. Producao e liberada APENAS para "
+            "DFe recebido, e apenas com as tres flags de autorizacao explicita."
         ),
         "ambiente": _ambiente(),
-        "required_flags": [
-            "FISCALONE_ENABLE_PRODUCAO=true",
-            "MAPONE_FISCAL_PRODUCAO_READY=true",
-        ],
+        "required_flags": [f"{f}=1" for f in _REQUIRED_PRODUCAO_FLAGS],
+        "flags_faltantes": faltantes,
+        "escopo_liberado": "dfe_recebido_apenas",
+    }), 403
+
+def bloquear_emissao(operacao, trace_id, source_system="desconhecido"):
+    """
+    Guard central absoluto: emissao fiscal permanece bloqueada mesmo com
+    todas as flags de producao liberadas. Ignora _producao_bloqueada().
+    """
+    _log_stdout(
+        operacao,
+        "bloqueado_emissao",
+        trace_id,
+        source_system=source_system,
+        erro_msg="emissao fiscal permanentemente bloqueada nesta fase",
+    )
+    return jsonify({
+        "ok": False,
+        "trace_id": trace_id,
+        "codigo": "EMISSAO_BLOQUEADA",
+        "erro": "FiscalOne liberado apenas para DFe recebido; emissao fiscal permanece bloqueada.",
+        "escopo_liberado": "dfe_recebido_apenas",
     }), 403
 
 def _provider_response(operacao, payload, status_padrao=501):
     status = 200 if payload.get("ok") else status_padrao
     return jsonify(payload), status
-
-def _emissao_nao_liberada(doc_type, trace_id, source_system="desconhecido"):
-    _log_stdout(
-        f"emitir_{doc_type}",
-        "bloqueado_validacoes",
-        trace_id,
-        source_system=source_system,
-        erro_msg="Emissão fiscal bloqueada até gates TMS estarem completos",
-    )
-    return jsonify({
-        "ok": False,
-        "trace_id": trace_id,
-        "codigo": "EMISSAO_FISCAL_NAO_LIBERADA",
-        "erro": (
-            f"Emissão de {doc_type.upper()} ainda não liberada. Testes devem ocorrer "
-            "somente em homologação; produção permanece bloqueada até validação "
-            "exaustiva do MapOne."
-        ),
-        "ambiente": _ambiente(),
-        "gates_obrigatorios": [
-            "CIOT quando aplicável",
-            "VPO / Vale-Pedágio Obrigatório",
-            "RNTRC / ANTT",
-            "seguro e averbação",
-            "documentos fiscais vinculados",
-            "veículo e condutor válidos",
-        ],
-    }), 501
 
 def get_provider():
     if FISCAL_PROVIDER == "focusnfe":
@@ -143,21 +142,34 @@ def health():
         "ambiente":            _ambiente(),
         "producao_bloqueada":  _producao_bloqueada(),
         "fase":                "fase_1_dfe_recebidos",
-        "sefaz_ativo":         False,
+        "escopo_liberado":     "dfe_recebido_apenas",
+        "flags_producao": {
+            f: _flag(f) for f in _REQUIRED_PRODUCAO_FLAGS
+        },
+        "flags_producao_faltantes": [
+            f for f in _REQUIRED_PRODUCAO_FLAGS if not _flag(f)
+        ],
+        "sefaz_ativo":         True,
         "emissao_ativa":       False,
+        "emissao_bloqueada_por_design": True,
         "persistencia_propria": False,
         "capacidade": {
-            "parse_xml_zip":   True,
-            "parse_pdf":       True,
-            "parse_nfse_xml":  True,
-            "parse_nfse_pdf":  True,
-            "gov_fetch":       False,
-            "emitir_cte":      False,
-            "emitir_mdfe":     False,
-            "consulta_sefaz":  False,
-            "certificado":     False,
+            "parse_xml_zip":       True,
+            "parse_pdf":           True,
+            "parse_nfse_xml":      True,
+            "parse_nfse_pdf":      True,
+            "gov_fetch_dfe":       True,
+            "emitir_nfe":          False,
+            "emitir_cte":          False,
+            "emitir_mdfe":         False,
+            "cancelar":            False,
+            "inutilizar":          False,
+            "cce":                 False,
+            "encerrar_mdfe":       False,
+            "condutor_mdfe":       False,
+            "certificado_em_transito": True,
         },
-        "version":             "0.4.0",
+        "version":             "0.5.0",
         "adr":                 "ADR-0035",
     })
 
@@ -418,45 +430,56 @@ def detalhe_cte(chave):
         return _bloqueio_producao("detalhe_cte", trace_id, source_system)
     return _provider_response("detalhe_cte", get_provider().detalhe_cte(chave))
 
+# ── Emissao / cancelamento / MDF-e — BLOQUEIO ABSOLUTO ─────────────────────
+# Independem das flags de producao. FiscalOne nesta fase e apenas gateway
+# para consulta/recepcao DFe. Assinatura, emissao, cancelamento, inutilizacao,
+# CC-e, encerramento MDF-e e condutor MDF-e ficam bloqueados por design.
+
 @app.route("/fiscal/cte", methods=["POST"])
 def emitir_cte():
-    trace_id = _trace(request)
-    source_system = request.headers.get("X-Source-System", "desconhecido")
-    if _producao_bloqueada():
-        return _bloqueio_producao("emitir_cte", trace_id, source_system)
-    return _emissao_nao_liberada("cte", trace_id, source_system)
+    return bloquear_emissao("emitir_cte", _trace(request),
+                            request.headers.get("X-Source-System", "desconhecido"))
 
 @app.route("/fiscal/mdfe", methods=["POST"])
 def emitir_mdfe():
-    trace_id = _trace(request)
-    source_system = request.headers.get("X-Source-System", "desconhecido")
-    if _producao_bloqueada():
-        return _bloqueio_producao("emitir_mdfe", trace_id, source_system)
-    return _emissao_nao_liberada("mdfe", trace_id, source_system)
+    return bloquear_emissao("emitir_mdfe", _trace(request),
+                            request.headers.get("X-Source-System", "desconhecido"))
 
 @app.route("/fiscal/mdfe/<chave>/encerrar", methods=["POST"])
 def encerrar_mdfe(chave):
-    trace_id = _trace(request)
-    source_system = request.headers.get("X-Source-System", "desconhecido")
-    if _producao_bloqueada():
-        return _bloqueio_producao("encerrar_mdfe", trace_id, source_system)
-    return _emissao_nao_liberada("mdfe_encerramento", trace_id, source_system)
+    return bloquear_emissao("encerrar_mdfe", _trace(request),
+                            request.headers.get("X-Source-System", "desconhecido"))
 
 @app.route("/fiscal/mdfe/<chave>/condutor", methods=["POST"])
 def incluir_condutor_mdfe(chave):
-    trace_id = _trace(request)
-    source_system = request.headers.get("X-Source-System", "desconhecido")
-    if _producao_bloqueada():
-        return _bloqueio_producao("incluir_condutor_mdfe", trace_id, source_system)
-    return _emissao_nao_liberada("mdfe_condutor", trace_id, source_system)
+    return bloquear_emissao("incluir_condutor_mdfe", _trace(request),
+                            request.headers.get("X-Source-System", "desconhecido"))
 
 @app.route("/fiscal/cte/<chave>", methods=["DELETE"])
 def cancelar_cte(chave):
-    trace_id = _trace(request)
-    source_system = request.headers.get("X-Source-System", "desconhecido")
-    if _producao_bloqueada():
-        return _bloqueio_producao("cancelar_cte", trace_id, source_system)
-    return _emissao_nao_liberada("cte_cancelamento", trace_id, source_system)
+    return bloquear_emissao("cancelar_cte", _trace(request),
+                            request.headers.get("X-Source-System", "desconhecido"))
+
+# Rotas defensivas para emissoes futuras — sempre bloqueadas
+@app.route("/fiscal/nfe", methods=["POST"])
+def emitir_nfe():
+    return bloquear_emissao("emitir_nfe", _trace(request),
+                            request.headers.get("X-Source-System", "desconhecido"))
+
+@app.route("/fiscal/nfe/<chave>", methods=["DELETE"])
+def cancelar_nfe(chave):
+    return bloquear_emissao("cancelar_nfe", _trace(request),
+                            request.headers.get("X-Source-System", "desconhecido"))
+
+@app.route("/fiscal/nfe/<chave>/inutilizar", methods=["POST"])
+def inutilizar_nfe(chave):
+    return bloquear_emissao("inutilizar_nfe", _trace(request),
+                            request.headers.get("X-Source-System", "desconhecido"))
+
+@app.route("/fiscal/nfe/<chave>/cce", methods=["POST"])
+def cce_nfe(chave):
+    return bloquear_emissao("cce_nfe", _trace(request),
+                            request.headers.get("X-Source-System", "desconhecido"))
 
 @app.route("/fiscal/status/<uf>")
 def status_sefaz(uf):

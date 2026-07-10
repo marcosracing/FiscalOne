@@ -69,19 +69,50 @@ def _extract_cnpj(cert_obj):
     return None
 
 
+def _env(*names):
+    """Le a primeira env var nao-vazia entre `names`."""
+    for n in names:
+        v = os.environ.get(n)
+        if v and v.strip():
+            return v.strip()
+    return ""
+
+
 def _read_env_pfx():
-    """Le PFX+senha via env (fallback homologacao). Retorna (pfx, pw) ou (None, None)."""
-    path = (os.environ.get("GOV_CERT_PATH") or "").strip()
+    """
+    Le PFX+senha via env (fallback controlado). Retorna (pfx_bytes, pw_bytes, tag).
+
+    Fontes aceitas em ordem:
+      1. FISCALONE_CERT_PFX_BASE64 + FISCALONE_CERT_PASSWORD  → tag: env_base64
+      2. FISCALONE_CERT_PFX_PATH   + FISCALONE_CERT_PASSWORD  → tag: env_path
+      3. GOV_CERT_PATH             + GOV_CERT_PASSWORD        → tag: env_path_legacy
+
+    Segredos NUNCA sao logados.
+    """
+    pfx_b64_env = _env("FISCALONE_CERT_PFX_BASE64")
+    if pfx_b64_env:
+        try:
+            pfx_bytes = base64.b64decode(pfx_b64_env, validate=True)
+        except Exception:
+            raise CertResolveError(
+                "CERT_ENV_INVALIDO",
+                "FISCALONE_CERT_PFX_BASE64 nao e base64 valido",
+            )
+        senha = _env("FISCALONE_CERT_PASSWORD", "GOV_CERT_PASSWORD", "GOV_CERT_PASS")
+        return pfx_bytes, senha.encode("utf-8") if senha else b"", "env_base64"
+
+    path = _env("FISCALONE_CERT_PFX_PATH", "GOV_CERT_PATH")
     if not path:
         return None, None, "sem_env"
     p = Path(path)
     if not p.exists():
         raise CertResolveError(
             "CERT_ENV_INVALIDO",
-            "GOV_CERT_PATH configurado mas arquivo nao encontrado",
+            "Caminho do PFX configurado no ambiente, mas arquivo nao encontrado",
         )
-    senha = os.environ.get("GOV_CERT_PASSWORD") or os.environ.get("GOV_CERT_PASS") or ""
-    return p.read_bytes(), senha.encode("utf-8") if senha else b"", "env"
+    senha = _env("FISCALONE_CERT_PASSWORD", "GOV_CERT_PASSWORD", "GOV_CERT_PASS")
+    tag   = "env_path" if os.environ.get("FISCALONE_CERT_PFX_PATH") else "env_path_legacy"
+    return p.read_bytes(), senha.encode("utf-8") if senha else b"", tag
 
 
 def resolve_cert(payload, tenant_cnpj):
@@ -131,7 +162,8 @@ def resolve_cert(payload, tenant_cnpj):
             raise CertResolveError(
                 "CERT_NAO_CONFIGURADO",
                 "Nenhum certificado A1 disponivel: envie cert_pfx_base64 no payload "
-                "ou configure GOV_CERT_PATH/GOV_CERT_PASSWORD (fallback homologacao)",
+                "ou configure FISCALONE_CERT_PFX_BASE64/PATH + FISCALONE_CERT_PASSWORD "
+                "(fallback controlado — GOV_CERT_PATH/PASSWORD ainda aceito por compat)",
             )
         pfx_bytes, pw_bytes, fonte = env_pfx, env_pw, tag
 

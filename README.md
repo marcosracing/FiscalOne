@@ -27,22 +27,35 @@ O FiscalOne nao tem banco, nao persiste XML raw, protocolo, evento, cooldown ou 
 Toda persistencia e responsabilidade da vertical (MapOne, CtrlOne).
 trace_id propaga — nao armazena. Log vai para stdout; a vertical coleta se necessario.
 
-## Trava de seguranca fiscal
+## Trava de seguranca fiscal — producao liberada APENAS para DFe recebido
 
-O FiscalOne nasce em homologacao. Operacoes Gov.br, CT-e, MDF-e, cancelamento,
-encerramento, inclusao de condutor e consultas SEFAZ ficam bloqueadas em producao
-ate o MapOne estar exaustivamente testado.
+Nesta fase o FiscalOne e gateway exclusivo para consulta/recepcao DFe
+(NFeDistDFeInteresse / CTeDistDFeInteresse). Emissao fiscal em qualquer
+natureza (NF-e, CT-e, MDF-e, cancelamento, inutilizacao, CC-e, encerramento
+MDF-e, condutor MDF-e) permanece **bloqueada por design** — mesmo com todas
+as flags de producao ligadas.
 
-Padrao obrigatorio:
+Padrao obrigatorio (homologacao):
 
     FISCALONE_AMBIENTE=homologacao
-    FISCALONE_ENABLE_PRODUCAO=false
-    MAPONE_FISCAL_PRODUCAO_READY=false
+    FISCALONE_ENABLE_PRODUCAO=0
+    MAPONE_FISCAL_PRODUCAO_READY=0
+    FISCALONE_DFE_RECEBIDO_ONLY=0
 
-Para qualquer uso futuro em producao, as duas flags precisam ser liberadas
-explicitamente e revisadas. MDF-e exige gates TMS antes de emissao: CIOT quando
-aplicavel, VPO/Vale-Pedagio Obrigatorio, RNTRC/ANTT, seguro/averbacao, documentos
-fiscais vinculados, veiculo e condutor validos.
+Para liberar producao DFe recebido, as **tres** flags precisam estar em `1`:
+
+    FISCALONE_AMBIENTE=producao
+    FISCALONE_ENABLE_PRODUCAO=1
+    MAPONE_FISCAL_PRODUCAO_READY=1
+    FISCALONE_DFE_RECEBIDO_ONLY=1
+
+Regras:
+
+- `POST /fiscal/gov/fetch` opera em producao **somente** com as tres flags = 1.
+- Qualquer rota de emissao/cancelamento/inutilizacao/CC-e/encerramento MDF-e
+  ou condutor retorna **403 EMISSAO_BLOQUEADA**, ignorando as flags.
+- `GET /fiscal/health` reporta `flags_producao`, `flags_producao_faltantes`,
+  `escopo_liberado` e `emissao_bloqueada_por_design`.
 
 ## Provider pattern (arquitetural — stubs hoje)
 
@@ -177,13 +190,19 @@ A vertical decide como persistir/repeitar.
 
 ## Certificado A1
 
-Em transito, nunca em repouso. FiscalOne:
+Em transito, nunca em repouso. Fontes aceitas, em ordem:
 
-- Recebe PFX em base64 + senha na requisicao (`cert_pfx_base64` + `cert_password`)
-- Ou lê `GOV_CERT_PATH` + `GOV_CERT_PASSWORD` (fallback local homologacao)
-- Descarta o bundle apos a chamada (`cert_provider.wipe`)
+1. `cert_pfx_base64` + `cert_password` no payload da requisicao (padrao producao)
+2. `FISCALONE_CERT_PFX_BASE64` + `FISCALONE_CERT_PASSWORD` no env (teste controlado)
+3. `FISCALONE_CERT_PFX_PATH` + `FISCALONE_CERT_PASSWORD` no env (teste controlado)
+4. `GOV_CERT_PATH` + `GOV_CERT_PASSWORD` (compat legado)
+
+Regras:
+
+- Bundle descartado apos a chamada (`cert_provider.wipe`)
 - PEM temporario: chmod 600, unlink imediato apos `ssl.load_cert_chain`
-- Verifica se o CNPJ ICP-Brasil no cert bate com o `cnpj_tenant`
+- CNPJ ICP-Brasil embutido no cert precisa bater com `cnpj_tenant`
+- Nunca loga senha, base64, PFX, PEM, token ou xml_bruto
 
 ## ADRs
 
