@@ -20,6 +20,7 @@ import time
 import zipfile
 import io
 from flask import Flask, jsonify, request
+from werkzeug.exceptions import HTTPException
 
 from xml_parser import parse_xml, parse_pdf, parse_document
 
@@ -130,7 +131,37 @@ def _log_stdout(operacao, resultado, trace_id, **kwargs):
         "erro":        kwargs.get("erro_msg"),
     }
     entry = {k: v for k, v in entry.items() if v is not None}
-    print(json.dumps(entry, ensure_ascii=False), flush=True)
+    try:
+        print(json.dumps(entry, ensure_ascii=False), flush=True)
+    except (BrokenPipeError, OSError):
+        # O stdout do processo pode estar fechado quando o FiscalOne roda em
+        # terminal/daemon transitório. Log quebrado nunca pode derrubar API.
+        pass
+
+
+@app.errorhandler(Exception)
+def _json_error_handler(exc):
+    """Garante JSON em exceções internas das rotas fiscais."""
+    if isinstance(exc, HTTPException):
+        return exc
+    trace_id = "fo-erro"
+    try:
+        trace_id = _trace(request)
+        _log_stdout(
+            "erro_http",
+            "erro",
+            trace_id,
+            source_system=request.headers.get("X-Source-System", "desconhecido"),
+            erro_msg=f"{type(exc).__name__}: excecao nao tratada",
+        )
+    except Exception:
+        pass
+    return jsonify({
+        "ok": False,
+        "trace_id": trace_id,
+        "codigo": "ERRO_INTERNO",
+        "erro": "Erro interno no FiscalOne — verifique logs do serviço",
+    }), 500
 
 # ── Health ─────────────────────────────────────────────────────────────────────
 

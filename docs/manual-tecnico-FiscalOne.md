@@ -165,6 +165,16 @@ Codigos:
     SEFAZ_INDISPONIVEL, SEFAZ_HTTP_ERRO, SEFAZ_XML_INVALIDO, TLS_ERRO
     FISCALONE_PRODUCAO_BLOQUEADA, ERRO_INTERNO
 
+Blindagem operacional (2026-07-10):
+
+- `app.py` possui `@app.errorhandler(Exception)` para transformar exceções
+  não tratadas das rotas fiscais em JSON `ERRO_INTERNO`;
+- `_log_stdout()` nunca pode derrubar a API. Se o stdout do processo estiver
+  fechado/quebrado (ex.: terminal encerrado, daemon transitório ou pipe
+  inválido), o erro de log é absorvido;
+- `/fiscal/gov/fetch` deve continuar devolvendo JSON mesmo quando produção está
+  bloqueada, payload está inválido ou falta certificado.
+
 ## 9. Logging
 
 Log tecnico estruturado em **stdout** (ADR-0035). A vertical coleta o que
@@ -172,6 +182,9 @@ precisar persistir em sua tabela de log fiscal.
 
 Campos: `ts, service, operacao, resultado, trace_id, source, cnpj, doc_type,
 chave, duracao_ms, erro`. Segredos (PFX/PEM/senha/token) nunca sao logados.
+
+O stdout é observabilidade, não dependência funcional. Falha de escrita no log
+não pode mudar o HTTP de saída nem gerar HTML 500 para MapOne.
 
 ## 10. O que NAO foi migrado do CtrlOne (proposital)
 
