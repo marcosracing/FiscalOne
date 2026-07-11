@@ -22,6 +22,12 @@ import io
 from flask import Flask, jsonify, request
 from werkzeug.exceptions import HTTPException
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from xml_parser import parse_xml, parse_pdf, parse_document
 
 app = Flask(__name__)

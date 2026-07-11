@@ -175,6 +175,19 @@ Blindagem operacional (2026-07-10):
 - `/fiscal/gov/fetch` deve continuar devolvendo JSON mesmo quando produção está
   bloqueada, payload está inválido ou falta certificado.
 
+Liberação producao DFe recebido (2026-07-11):
+
+- `.env` do FiscalOne agora carrega automaticamente via `python-dotenv`
+  (importado no boot do `app.py`).
+- 3 flags ligadas em producao (via `.env`):
+  `FISCALONE_ENABLE_PRODUCAO=1`, `MAPONE_FISCAL_PRODUCAO_READY=1`,
+  `FISCALONE_DFE_RECEBIDO_ONLY=1`.
+- Certificado A1 continua vindo em memoria do MapOne no payload
+  (`cert_pfx_base64`). `GOV_CERT_PATH/PASSWORD` permanecem no `.env`
+  apenas por compat — VAZIOS, nunca acionados.
+- Emissao/cancelamento/inutilizacao/CC-e/MDF-e continuam bloqueados
+  por design (`bloquear_emissao`), independente das flags.
+
 ## 9. Logging
 
 Log tecnico estruturado em **stdout** (ADR-0035). A vertical coleta o que
