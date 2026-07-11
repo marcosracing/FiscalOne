@@ -270,6 +270,7 @@ def fetch_dfe(cert_pem, key_pem, cnpj, tipo, ambiente, ultimo_nsu, trace_id,
             codigo     = parsed.get("codigo")
 
             item_base = {
+                "ok":               True,
                 "nsu":              nsu,
                 "schema":           schema,
                 "doc_type":         parsed.get("doc_type"),

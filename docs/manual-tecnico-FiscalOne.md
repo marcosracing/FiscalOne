@@ -241,3 +241,51 @@ Enquanto MapOne nao estiver pronto, `FISCALONE_ENABLE_PRODUCAO` continua false.
     curl -X POST http://localhost:5002/fiscal/gov/fetch \
       -H "Content-Type: application/json" \
       -d '{"cnpj_tenant":"07219398000109","ambiente":"homologacao","tipo":"nfe","ultimo_nsu":"0","cert_source":"env"}'
+
+## 9. Deploy Mac → VM
+
+FiscalOne deve ser implantado como serviço independente na VM, escutando apenas
+em `127.0.0.1:5002`. O MapOne chama o gateway por `FISCALONE_URL`, com padrão
+`http://127.0.0.1:5002`.
+
+Script versionado:
+
+```bash
+cd ~/Documents/FiscalOne
+scripts/deploy_fiscalone_vm.sh
+```
+
+O deploy:
+
+- exige worktree limpo;
+- sincroniza o código para `/home/ubuntu/FiscalOne`;
+- não copia `.env`, `.venv`, `.git`, logs ou segredos;
+- recria/atualiza `.venv` e instala `requirements.txt`;
+- cria `.env` operacional sem certificado;
+- instala/reinicia `fiscalone.service`;
+- valida `GET /fiscal/health`.
+
+Flags da VM para DFe recebido em produção:
+
+```env
+FISCALONE_AMBIENTE=producao
+FISCALONE_ENABLE_PRODUCAO=1
+MAPONE_FISCAL_PRODUCAO_READY=1
+FISCALONE_DFE_RECEBIDO_ONLY=1
+FISCAL_PROVIDER=sefaz
+```
+
+Certificado A1 não mora no FiscalOne. O bundle vem em trânsito por payload do
+MapOne, a partir do cofre da vertical, e é descartado ao fim da requisição.
+
+## 10. Contrato `results[]` DFe
+
+A partir de 2026-07-11, cada item em `results[]` traz `ok` explícito:
+
+- `COMPLETO`: `ok=true`, `status_xml=COMPLETO`, pode persistir em `op_fiscal_xml`.
+- `RESUMO`: `ok=true`, `status_xml=RESUMO`, `codigo=RESUMO_DFE_RECEBIDO`; é
+  pendência de XML completo, não erro.
+- `ERRO`: `ok=false`, `status_xml=ERRO`, deve ir para log/incidente.
+
+Isso evita que consumidores tratem resumos ou documentos completos como erro
+apenas porque envelopes antigos não traziam `ok` no item unificado.
