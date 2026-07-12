@@ -202,7 +202,9 @@ def fetch_dfe(cert_pem, key_pem, cnpj, tipo, ambiente, ultimo_nsu, trace_id,
     # ── Rota NFS-e Nacional (ADN) — sem SOAP, sem cStat ────────────────────
     if tipo == "nfse":
         from providers.nfse_nacional_provider import consultar_dfe_nsu
-        nsu = re.sub(r"\D", "", ultimo_nsu or "") or "0"
+        from services.nsu_utils import normalizar_nsu
+        # ADN: NSU e string livre (preserva o que veio; NUNCA zfill).
+        nsu = normalizar_nsu("adn_nfse", "nfse", ultimo_nsu)
         r = consultar_dfe_nsu(
             cert_pem, key_pem, cnpj, nsu, ambiente, trace_id,
             incluir_xml_bruto=incluir_xml_bruto,
@@ -238,8 +240,9 @@ def fetch_dfe(cert_pem, key_pem, cnpj, tipo, ambiente, ultimo_nsu, trace_id,
             "duracao_ms":               r.get("duracao_ms"),
         }
 
-    ult = re.sub(r"\D", "", ultimo_nsu or "") or "0"
-    ult = ult.zfill(15)
+    # SEFAZ: NFeDistDFeInteresse exige NSU 15 digitos zero-padded (spec XSD).
+    from services.nsu_utils import normalizar_nsu
+    ult = normalizar_nsu("sefaz", tipo, ultimo_nsu)
 
     try:
         host, path, env_fn, tp_amb = _endpoint(tipo, ambiente)
