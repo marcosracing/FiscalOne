@@ -62,6 +62,17 @@ class SefazProvider(GovProvider):
         result["cert_fonte"] = cert_fonte
         return result
 
+    def consultar_dfe_nsu(self, cert_pem, key_pem, cnpj, nsu, ambiente, trace_id):
+        """
+        Consulta por NSU — delega ao dfe_fetch_service com tipo=nfe (default).
+        Uso interno / diagnostico. Producao continua indo por gov_fetch.
+        """
+        from services import dfe_fetch_service
+        return dfe_fetch_service.fetch_dfe(
+            cert_pem=cert_pem, key_pem=key_pem, cnpj=cnpj,
+            tipo="nfe", ambiente=ambiente, ultimo_nsu=nsu, trace_id=trace_id,
+        )
+
     # ── Stubs (Fase 2 pendente) ─────────────────────────────────────────
     def sync(self, cnpj): return _STUB
     def listar_nfe(self, cnpj, pagina=1): return _STUB
