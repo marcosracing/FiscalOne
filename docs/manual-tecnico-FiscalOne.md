@@ -17,12 +17,42 @@ responsabilidade da vertical. FiscalOne mantem o zero-persistencia da ADR-0035.
 
 ## 2. Modulos
 
-    /providers/sefaz_provider.py     GovProvider real: gov_fetch(payload, trace_id)
-    /providers/focusnfe_provider.py  Stub — implementar quando necessario
-    /services/cert_provider.py       Resolve cert A1 por requisicao, em memoria
-    /services/dfe_fetch_service.py   Uma consulta NFeDistDFeInteresse/CTeDistDFeInteresse
-    /xml_parser.py                   Parseia NF-e/CT-e/MDF-e/NFS-e (recebidos)
-    /app.py                          HTTP: /fiscal/health, /documents/import, /gov/fetch
+    /providers/sefaz_provider.py           GovProvider real: gov_fetch(payload, trace_id)
+    /providers/nfse_nacional_provider.py   ADN NFS-e Nacional por NSU (GET mTLS)
+    /providers/focusnfe_provider.py        Stub — implementar quando necessario
+    /services/cert_provider.py             Resolve cert A1 por requisicao, em memoria
+    /services/dfe_fetch_service.py         Rotea: nfe/cte → SEFAZ SOAP · nfse → ADN
+    /xml_parser.py                         Parseia NF-e/CT-e/MDF-e/NFS-e (recebidos)
+    /app.py                                HTTP: /fiscal/health, /documents/import, /gov/fetch
+
+## 2a. NFS-e Nacional via ADN (inicio operacional 2026-07-01)
+
+Provider dedicado (`providers/nfse_nacional_provider.py`) — GET REST mTLS por NSU.
+
+Endpoint:
+
+    GET https://<HOST_ADN>/contribuintes/DFe/{NSU}
+    Header: Accept: application/json
+
+Hosts por ambiente:
+
+    ambiente="producao"    → adn.nfse.gov.br                    (ambiente_adn: producao)
+    ambiente="homologacao" → adn.producaorestrita.nfse.gov.br   (ambiente_adn: producao_restrita)
+
+Resposta ADN esperada (JSON):
+
+    { "StatusProcessamento": "DOCUMENTOS_LOCALIZADOS" | "...",
+      "UltimoNSU": "...", "MaxNSU": "...",
+      "LoteDFe": [ { "NSU": "...", "ArquivoXml": "<gzip+base64>", ... } ] }
+
+Trata HTTP:
+- 200 c/ LoteDFe → documentos NFS-e completos (parseados via `xml_parser`)
+- 200 c/ LoteDFe vazio, 204, 404 → `status="SEM_DOCUMENTO"` (cooldown 3600s)
+- 403 → `NFSE_ADN_AUTH_ERRO` (cert nao habilitado, cooldown 3600s)
+- outros → `NFSE_ADN_HTTP_ERRO` (cooldown 900s)
+
+`data_inicio` no payload e apenas metadado operacional — o FiscalOne nao filtra
+por data; ADN e por NSU. Corte real por data e responsabilidade do MapOne.
 
 ## 3a. RESUMO x COMPLETO (Distribuicao DFe)
 

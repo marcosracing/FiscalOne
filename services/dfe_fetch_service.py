@@ -169,24 +169,27 @@ def _sha256(text):
 # ── Fetch principal ─────────────────────────────────────────────────────────
 
 def fetch_dfe(cert_pem, key_pem, cnpj, tipo, ambiente, ultimo_nsu, trace_id,
-              incluir_xml_bruto=True):
+              incluir_xml_bruto=True, data_inicio=None):
     """
-    Executa UMA consulta NFeDistDFeInteresse / CTeDistDFeInteresse.
+    Executa UMA consulta DFe.
+      - tipo "nfe" | "cte" → SEFAZ NFeDistDFeInteresse / CTeDistDFeInteresse (SOAP mTLS).
+      - tipo "nfse"        → ADN NFS-e Nacional por NSU (REST mTLS).
 
     Args:
         cert_pem, key_pem: bytes (bundle da requisicao — sem persistencia).
         cnpj:              14 digitos (interessado).
-        tipo:              "nfe" | "cte".
+        tipo:              "nfe" | "cte" | "nfse".
         ambiente:          "producao" | "homologacao" (ou "1" | "2").
-        ultimo_nsu:        string 15 digitos (envia zeros para primeira).
+        ultimo_nsu:        string. Zero-fill em SEFAZ, string livre no ADN.
         trace_id:          para propagar em logs e resposta.
         incluir_xml_bruto: se True, devolve o XML por documento (vertical persiste).
+        data_inicio:       "YYYY-MM-DD" — metadado operacional NFS-e (eco).
+                           Corte real por data e feito pelo MapOne.
 
     Returns:
-        dict com cstat, xmotivo, ultimo_nsu, max_nsu, cooldown_recomendado_seg,
-        documentos:[{doc_type, chave, numero, emit_cnpj, emit_nome, dest_cnpj,
-                     dh_emi, valor_total, xml_bruto, xml_hash_sha256, parser_version}].
-        Nao lanca — retorna ok=False com codigo controlado em caso de erro.
+        Envelope compativel MapOne: documentos[], resumos[], erros[], results[]
+        + cstat/xmotivo (SEFAZ) OU status/status_processamento (NFS-e Nacional).
+        Nao lanca — sempre retorna dict controlado.
     """
     cnpj = re.sub(r"\D", "", cnpj or "")
     if len(cnpj) != 14:
@@ -194,6 +197,45 @@ def fetch_dfe(cert_pem, key_pem, cnpj, tipo, ambiente, ultimo_nsu, trace_id,
             "ok": False,
             "codigo": "CNPJ_INVALIDO",
             "erro": "cnpj_tenant deve ter 14 digitos",
+        }
+
+    # ── Rota NFS-e Nacional (ADN) — sem SOAP, sem cStat ────────────────────
+    if tipo == "nfse":
+        from providers.nfse_nacional_provider import consultar_dfe_nsu
+        nsu = re.sub(r"\D", "", ultimo_nsu or "") or "0"
+        r = consultar_dfe_nsu(
+            cert_pem, key_pem, cnpj, nsu, ambiente, trace_id,
+            incluir_xml_bruto=incluir_xml_bruto,
+        )
+        # Traduz para envelope comum
+        documentos = r.get("documentos") or []
+        resumos    = r.get("resumos")    or []
+        erros      = r.get("erros")      or []
+        # results[] com categoria — reaproveita o do provider ou monta aqui
+        results = r.get("results") or (
+            [{**d, "categoria": "COMPLETO"} for d in documentos]
+            + [{**s, "categoria": "RESUMO"}   for s in resumos]
+            + [{**e, "categoria": "ERRO"}     for e in erros]
+        )
+        return {
+            "ok":                       bool(r.get("ok")),
+            "codigo":                   r.get("codigo"),
+            "erro":                     r.get("erro"),
+            "provider":                 "nfse_nacional",
+            "ambiente_adn":             r.get("ambiente_adn"),
+            "status":                   r.get("status"),
+            "status_processamento":     r.get("status_processamento"),
+            "cstat":                    None,   # NFS-e Nacional nao tem cStat
+            "xmotivo":                  None,
+            "ultimo_nsu":               r.get("ultimo_nsu") or nsu,
+            "max_nsu":                  r.get("max_nsu")    or "",
+            "cooldown_recomendado_seg": r.get("cooldown_recomendado_seg"),
+            "documentos":               documentos,
+            "resumos":                  resumos,
+            "erros":                    erros,
+            "results":                  results,
+            "data_inicio":              data_inicio,
+            "duracao_ms":               r.get("duracao_ms"),
         }
 
     ult = re.sub(r"\D", "", ultimo_nsu or "") or "0"
@@ -329,5 +371,6 @@ def fetch_dfe(cert_pem, key_pem, cnpj, tipo, ambiente, ultimo_nsu, trace_id,
         "resumos":                  resumos,
         "erros":                    erros,
         "results":                  results,
+        "data_inicio":              data_inicio,
         "duracao_ms":               duracao_ms,
     }

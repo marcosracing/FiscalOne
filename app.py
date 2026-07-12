@@ -196,6 +196,8 @@ def health():
             "parse_nfse_xml":      True,
             "parse_nfse_pdf":      True,
             "gov_fetch_dfe":       True,
+            "gov_fetch_nfse":      True,
+            "nfse_adn_inicio_operacional": "2026-07-01",
             "emitir_nfe":          False,
             "emitir_cte":          False,
             "emitir_mdfe":         False,
@@ -303,16 +305,21 @@ def import_documents():
 @app.route("/fiscal/gov/fetch", methods=["POST"])
 def gov_fetch():
     """
-    Busca ativa DFe na SEFAZ (NF-e / CT-e — NFeDistDFeInteresse / CTeDistDFeInteresse).
+    Busca ativa DFe:
+      - tipo=nfe|cte → SEFAZ NFeDistDFeInteresse / CTeDistDFeInteresse
+      - tipo=nfse    → ADN NFS-e Nacional por NSU (inicio operacional 2026-07-01)
 
     Gateway puro (ADR-0035): nao persiste NSU, XML ou cooldown.
     Certificado A1 vem por requisicao (cert_pfx_base64+cert_password) ou via env
     (fallback homologacao). Descartado ao final da chamada.
 
     Payload:
-      cnpj_tenant, ambiente ("producao"|"homologacao"), tipo ("nfe"|"cte"),
-      ultimo_nsu, cert_pfx_base64 (opcional), cert_password (opcional),
-      cert_source (opcional: "inline_base64"|"env").
+      cnpj_tenant, ambiente ("producao"|"homologacao"),
+      tipo ("nfe"|"cte"|"nfse"), ultimo_nsu,
+      cert_pfx_base64 (opcional), cert_password (opcional),
+      cert_source (opcional: "inline_base64"|"env"),
+      data_inicio ("YYYY-MM-DD", metadado NFS-e — eco no retorno; corte
+        real por data e responsabilidade do MapOne).
 
     Sempre devolve JSON — nunca traceback HTML.
     """
@@ -350,12 +357,12 @@ def gov_fetch():
             "erro":     "cnpj_tenant obrigatorio (14 digitos)",
         }), 400
 
-    if tipo not in ("nfe", "cte"):
+    if tipo not in ("nfe", "cte", "nfse"):
         return jsonify({
             "ok":       False,
             "trace_id": trace_id,
             "codigo":   "TIPO_NAO_SUPORTADO",
-            "erro":     "tipo obrigatorio: 'nfe' ou 'cte'",
+            "erro":     "tipo obrigatorio: 'nfe', 'cte' ou 'nfse'",
         }), 400
 
     try:
@@ -394,6 +401,10 @@ def gov_fetch():
         "codigo":                   result.get("codigo"),
         "cstat":                    result.get("cstat"),
         "xmotivo":                  result.get("xmotivo"),
+        "provider":                 result.get("provider"),
+        "ambiente_adn":             result.get("ambiente_adn"),
+        "status":                   result.get("status"),
+        "status_processamento":     result.get("status_processamento"),
         "ultimo_nsu":               result.get("ultimo_nsu"),
         "max_nsu":                  result.get("max_nsu"),
         "cooldown_recomendado_seg": result.get("cooldown_recomendado_seg"),
@@ -406,6 +417,7 @@ def gov_fetch():
         "erro":                     result.get("erro") if not result.get("ok") else None,
         "ambiente":                 (payload.get("ambiente") or "homologacao").lower(),
         "tipo":                     tipo,
+        "data_inicio":              payload.get("data_inicio") or result.get("data_inicio"),
     }
     _ARRAY_KEYS = ("documentos", "resumos", "erros", "results")
     envelope = {k: v for k, v in envelope.items() if v is not None or k in _ARRAY_KEYS or k == "ok"}
@@ -421,7 +433,9 @@ def _status_para_codigo(codigo):
                   "CERT_INVALIDO", "CERT_ENV_INVALIDO",
                   "CERT_SEM_CNPJ", "CERT_FONTE_NAO_SUPORTADA"):
         return 400
-    if codigo in ("SEFAZ_INDISPONIVEL", "SEFAZ_HTTP_ERRO", "SEFAZ_XML_INVALIDO", "TLS_ERRO"):
+    if codigo in ("SEFAZ_INDISPONIVEL", "SEFAZ_HTTP_ERRO", "SEFAZ_XML_INVALIDO", "TLS_ERRO",
+                  "NFSE_ADN_HTTP_ERRO", "NFSE_ADN_TIMEOUT",
+                  "NFSE_ADN_XML_INVALIDO", "NFSE_ADN_AUTH_ERRO"):
         return 502
     return 500
 

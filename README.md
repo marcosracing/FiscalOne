@@ -10,7 +10,7 @@ Parseia NF-e/CT-e/MDF-e/NFS-e (XML e PDF) localmente. SEFAZ, emissao e busca ati
 | `POST /fiscal/documents/import` — parse XML/PDF/ZIP | operacional | NF-e, CT-e, MDF-e, NFS-e (nacional/ABRASF), NFS-e PDF (Prefeitura de SP + generico); sem persistencia propria |
 | `GET /fiscal/health` | operacional | Reporta fase, flags, capacidades e stubs ativos |
 | Trava de producao (flags duplas) | operacional | Bloqueia toda operacao em prod sem flags |
-| `POST /fiscal/gov/fetch` — busca SEFAZ/DFe ativo | operacional (fase 1 · NF-e/CT-e por pagina) | Gateway puro; cert A1 por requisicao |
+| `POST /fiscal/gov/fetch` — busca SEFAZ/DFe ativo | operacional (fase 1 · NF-e/CT-e por pagina, NFS-e Nacional/ADN por NSU) | Gateway puro; cert A1 por requisicao. NFS-e inicio operacional 2026-07-01 |
 | `POST /fiscal/sync/{cnpj}` — sync NF-e/CT-e | stub | SefazProvider nao migrado |
 | `GET /fiscal/nfe/{cnpj}`, `GET /fiscal/cte/{cnpj}` | stub | SefazProvider nao migrado |
 | `POST /fiscal/cte` — emitir CT-e | bloqueado | Nao implementado; retorna 501 |
@@ -117,12 +117,27 @@ Payload:
     {
       "cnpj_tenant":       "07219398000109",
       "ambiente":          "homologacao",     // ou "producao"
-      "tipo":              "nfe",             // ou "cte"
+      "tipo":              "nfe",             // ou "cte" ou "nfse"
       "ultimo_nsu":        "000000000000000",
       "cert_source":       "inline_base64",   // ou "env" (fallback homologacao)
       "cert_pfx_base64":   "<PFX em base64>",
-      "cert_password":     "<senha do PFX>"
+      "cert_password":     "<senha do PFX>",
+      "data_inicio":       "2026-07-01"       // opcional — metadado NFS-e (eco)
     }
+
+**NFS-e Nacional (ADN)** — `tipo="nfse"` — ativa desde **2026-07-01**:
+
+- Backend: `providers/nfse_nacional_provider.py` (GET mTLS por NSU)
+- Producao: `https://adn.nfse.gov.br/contribuintes/DFe/{NSU}`
+- Producao restrita: `https://adn.producaorestrita.nfse.gov.br/contribuintes/DFe/{NSU}`
+- Envelope: mesmo formato de NF-e/CT-e (`documentos`, `resumos`, `erros`, `results`),
+  porem `cstat`/`xMotivo` sao `null`; em lugar deles vem `status`
+  (`DOCUMENTOS_LOCALIZADOS`/`SEM_DOCUMENTO`) e `status_processamento` do ADN.
+- `data_inicio` (`YYYY-MM-DD`) — o FiscalOne so **ecoa** este campo; corte real
+  por data e responsabilidade do MapOne quando persistir/filtrar eventos.
+- Codigos de erro NFS-e: `NFSE_ADN_HTTP_ERRO`, `NFSE_ADN_TIMEOUT`,
+  `NFSE_ADN_XML_INVALIDO`, `NFSE_ADN_AUTH_ERRO`,
+  `NFSE_ADN_LOTE_SEM_ARQUIVO`, `NFSE_ADN_DECODE_FALHOU`.
 
 Resposta (ok=true):
 
