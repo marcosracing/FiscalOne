@@ -7,3 +7,5 @@ wallet/
 *.pfx
 *.p12
 *.sso
+logs/
+run/
