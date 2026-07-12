@@ -15,6 +15,7 @@ Capacidade atual:
 Porta: 5002
 """
 import os
+import logging
 import uuid
 import time
 import zipfile
@@ -32,7 +33,44 @@ from xml_parser import parse_xml, parse_pdf, parse_document
 
 app = Flask(__name__)
 
+# Logger dedicado para avisos de infraestrutura (nao mistura com log JSON
+# operacional em stdout via _log_stdout).
+logger = logging.getLogger("fiscalone")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
 FISCAL_PROVIDER = os.getenv("FISCAL_PROVIDER", "sefaz")
+GOV_TLS_INSECURE = os.getenv("GOV_TLS_INSECURE", "").strip() == "1"
+
+# ── Avisos de infraestrutura no boot ─────────────────────────────────────────
+if GOV_TLS_INSECURE:
+    logger.warning(
+        "GOV_TLS_INSECURE=1 ativo — verificacao TLS DESABILITADA. "
+        "USO PROIBIDO EM PRODUCAO."
+    )
+if FISCAL_PROVIDER == "focusnfe":
+    logger.warning(
+        "FISCAL_PROVIDER=focusnfe — stub. Todas as chamadas retornarao "
+        "PROVIDER_NAO_IMPLEMENTADO."
+    )
+
+
+def _classificar_status_lote(processados: int, persistidos: int, erros: int) -> str:
+    """
+    Regra:
+      - 0 processados                        → SEM_DOCUMENTO
+      - persistidos > 0 e erros == 0         → SUCESSO_TOTAL
+      - persistidos > 0 e erros > 0          → SUCESSO_PARCIAL
+      - persistidos == 0 e processados > 0   → FALHA_TOTAL
+    """
+    if processados == 0:
+        return "SEM_DOCUMENTO"
+    if persistidos > 0 and erros == 0:
+        return "SUCESSO_TOTAL"
+    if persistidos > 0 and erros > 0:
+        return "SUCESSO_PARCIAL"
+    return "FALHA_TOTAL"
 _PROD_AMBIENTES = {"prod", "producao", "produção", "production"}
 _TRUE_VALUES = {"1", "true", "yes", "sim", "on"}
 
@@ -187,6 +225,11 @@ def health():
             f for f in _REQUIRED_PRODUCAO_FLAGS if not _flag(f)
         ],
         "sefaz_ativo":         True,
+        "tls_insecure":        GOV_TLS_INSECURE,
+        "tls_warning":         (
+            "GOV_TLS_INSECURE ativo — uso proibido em producao."
+            if GOV_TLS_INSECURE else None
+        ),
         "emissao_ativa":       False,
         "emissao_bloqueada_por_design": True,
         "persistencia_propria": False,
@@ -283,21 +326,35 @@ def import_documents():
         results.append(parsed)
 
     duracao = int((time.monotonic() - t0) * 1000)
-    ok_count  = sum(1 for r in results if r.get("ok"))
-    err_count = len(results) - ok_count
+    persistidos = sum(1 for r in results if r.get("ok"))
+    resumos_n   = sum(1 for r in results if r.get("status_xml") == "RESUMO")
+    eventos_n   = sum(1 for r in results if r.get("status_xml") == "EVENTO")
+    erros_n     = sum(1 for r in results if not r.get("ok"))
+    processados = len(results)
+    status_lote = _classificar_status_lote(processados, persistidos, erros_n)
 
-    _log_stdout("parse_xml",
-                "ok" if ok_count > 0 else "erro",
-                trace_id,
-                source_system=source_system,
-                duracao_ms=duracao)
+    # Log operacional preciso: reflete falha em massa (nao mais mascarado).
+    resultado_log = ("ok" if status_lote == "SUCESSO_TOTAL"
+                     else "parcial" if status_lote == "SUCESSO_PARCIAL"
+                     else "erro")
+    _log_stdout("parse_xml", resultado_log, trace_id,
+                source_system=source_system, duracao_ms=duracao,
+                erro_msg=(None if resultado_log == "ok"
+                          else f"status_lote={status_lote} persistidos={persistidos} erros={erros_n}"))
 
     return jsonify({
-        "ok":       True,
-        "trace_id": trace_id,
-        "total":    ok_count,
-        "erros":    err_count,
-        "results":  results,
+        "ok":           True,
+        "trace_id":     trace_id,
+        "status_lote":  status_lote,
+        "recebidos":    processados,
+        "processados":  processados,
+        "persistidos":  persistidos,
+        "duplicados":   0,      # duplicidade e escopo do MapOne
+        "resumos":      resumos_n,
+        "eventos":      eventos_n,
+        "erros":        erros_n,
+        "total":        persistidos,        # compat legada
+        "results":      results,
     })
 
 # ── POST /fiscal/gov/fetch ─────────────────────────────────────────────────────
@@ -367,14 +424,16 @@ def gov_fetch():
 
     try:
         provider = get_provider()
-        if not hasattr(provider, "gov_fetch"):
-            return jsonify({
-                "ok":       False,
-                "trace_id": trace_id,
-                "codigo":   "PROVIDER_SEM_GOV_FETCH",
-                "erro":     f"Provider {FISCAL_PROVIDER} nao implementa gov_fetch",
-            }), 501
         result = provider.gov_fetch(payload, trace_id)
+    except NotImplementedError as e:
+        _log_stdout("gov_fetch", "erro", trace_id, source_system=source_system,
+                    erro_msg=f"PROVIDER_NAO_IMPLEMENTADO: {FISCAL_PROVIDER}")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "PROVIDER_NAO_IMPLEMENTADO",
+            "erro":     f"Provider '{FISCAL_PROVIDER}' nao implementa gov_fetch.",
+        }), 501
     except Exception as e:
         # Nao vaza traceback nem stack — apenas tipo de erro
         _log_stdout("gov_fetch", "erro", trace_id,
@@ -395,10 +454,29 @@ def gov_fetch():
                 duracao_ms=duracao_ms,
                 erro_msg=result.get("codigo") if not result.get("ok") else None)
 
+    docs_arr    = result.get("documentos") or []
+    resumos_arr = result.get("resumos") or []
+    erros_arr   = result.get("erros") or []
+    results_arr = result.get("results") or []
+    persistidos = len(docs_arr)
+    resumos_n   = len(resumos_arr)
+    eventos_n   = sum(1 for d in docs_arr + results_arr
+                      if d.get("status_xml") == "EVENTO")
+    erros_n     = len(erros_arr)
+    processados = persistidos + resumos_n + erros_n
+
     envelope = {
         "ok":                       bool(result.get("ok")),
         "trace_id":                 trace_id,
         "codigo":                   result.get("codigo"),
+        "status_lote":              _classificar_status_lote(processados, persistidos, erros_n),
+        "recebidos":                processados,
+        "processados":              processados,
+        "persistidos":              persistidos,
+        "duplicados":               0,   # duplicidade e escopo do MapOne
+        "resumos_count":            resumos_n,
+        "eventos":                  eventos_n,
+        "erros_count":              erros_n,
         "cstat":                    result.get("cstat"),
         "xmotivo":                  result.get("xmotivo"),
         "provider":                 result.get("provider"),
@@ -408,10 +486,10 @@ def gov_fetch():
         "ultimo_nsu":               result.get("ultimo_nsu"),
         "max_nsu":                  result.get("max_nsu"),
         "cooldown_recomendado_seg": result.get("cooldown_recomendado_seg"),
-        "documentos":               result.get("documentos") or [],
-        "resumos":                  result.get("resumos") or [],
-        "erros":                    result.get("erros") or [],
-        "results":                  result.get("results") or [],
+        "documentos":               docs_arr,
+        "resumos":                  resumos_arr,
+        "erros":                    erros_arr,
+        "results":                  results_arr,
         "duracao_ms":               result.get("duracao_ms") or duracao_ms,
         "cert_fonte":               result.get("cert_fonte"),
         "erro":                     result.get("erro") if not result.get("ok") else None,
@@ -437,6 +515,8 @@ def _status_para_codigo(codigo):
                   "NFSE_ADN_HTTP_ERRO", "NFSE_ADN_TIMEOUT",
                   "NFSE_ADN_XML_INVALIDO", "NFSE_ADN_AUTH_ERRO"):
         return 502
+    if codigo == "PROVIDER_NAO_IMPLEMENTADO":
+        return 501
     return 500
 
 # ── Rotas legadas (provider pattern — mantidas, stubs) ────────────────────────
