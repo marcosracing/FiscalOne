@@ -541,4 +541,4 @@ def status_sefaz(uf):
     return _provider_response("status_sefaz", get_provider().status_sefaz(uf))
 
 if __name__ == "__main__":
-    app.run(port=5002, debug=False)
+    app.run(port=5002, debug=False, threaded=True)

@@ -91,10 +91,12 @@ def _parse_xml(xml_bruto, trace_id):
 def _normalizar_doc(item, xml, parsed):
     """Monta dict compativel com o envelope /fiscal/gov/fetch."""
     status_xml = parsed.get("status_xml") or ("COMPLETO" if parsed.get("ok") else None)
+    parsed_doc_type = (parsed.get("doc_type") or parsed.get("type") or "nfse").lower()
     return {
         "ok":              bool(parsed.get("ok")),
         "provider":        "nfse_nacional",
-        "doc_type":        "nfse",
+        "type":            parsed.get("type") or parsed_doc_type,
+        "doc_type":        parsed_doc_type,
         "nsu":             str(item.get("NSU") or ""),
         "chave":           parsed.get("chave"),
         "numero":          parsed.get("numero"),

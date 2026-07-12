@@ -27,3 +27,28 @@ bruto em log.
 - `README.md`
 - `docs/manual-tecnico-FiscalOne.md`
 - `docs/adr/_handoff/`
+
+## Registro operacional — 2026-07-11
+
+NFS-e Nacional ADN está habilitado como DFe recebido. O provider deve preservar
+o tipo retornado pelo parser:
+
+- documento NFS-e completo: `doc_type=nfse`;
+- evento NFS-e: `doc_type=evento`.
+
+Eventos não são persistidos no acervo fiscal da vertical como documentos. O
+MapOne usa essa distinção para gravar apenas XML fiscal completo em
+`op_fiscal_xml` e tratar eventos em `op_dfe_evento`.
+
+## Registro operacional — 2026-07-11 b
+
+FiscalOne foi ajustado para subir com `threaded=True` no servidor Flask
+local/VM simples. O objetivo é aceitar chamadas simultâneas controladas do
+agendador multiempresa do MapOne.
+
+Limites preservados:
+
+- sem persistência própria;
+- sem certificado em repouso;
+- sem emissão fiscal ativa;
+- logs sem PFX, senha, base64 ou XML completo.

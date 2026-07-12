@@ -319,3 +319,47 @@ A partir de 2026-07-11, cada item em `results[]` traz `ok` explícito:
 
 Isso evita que consumidores tratem resumos ou documentos completos como erro
 apenas porque envelopes antigos não traziam `ok` no item unificado.
+
+## 13. NFS-e Nacional ADN — classificação de eventos (2026-07-11)
+
+O provider `providers/nfse_nacional_provider.py` não deve forçar todo XML
+baixado do ADN como `doc_type=nfse`.
+
+Regra atual:
+
+```text
+doc_type = parsed.doc_type || parsed.type || nfse
+type     = parsed.type || doc_type
+```
+
+Motivo: o ADN pode retornar XMLs de evento dentro do fluxo NFS-e. Esses XMLs
+possuem raiz `<evento xmlns="http://www.sped.fazenda.gov.br/nfse">` e não são
+documento fiscal recebido para acervo da vertical.
+
+Com a correção:
+
+- NFS-e completa continua retornando `doc_type=nfse`.
+- Evento NFS-e retorna `doc_type=evento`.
+- O MapOne registra evento em `op_dfe_evento` e não grava falso documento em
+  `op_fiscal_xml`.
+- FiscalOne continua sem persistência própria e sem emissão fiscal ativa.
+
+## 14. Requisições simultâneas multiempresa (2026-07-11)
+
+O FiscalOne deve atender chamadas de múltiplas verticais/tenants sem depender
+de sessão de usuário e sem persistir estado próprio.
+
+No ambiente local/VM simples, o `app.py` sobe Flask com `threaded=True` para
+permitir que o MapOne execute ciclos multiempresa com paralelismo controlado.
+
+Regras preservadas:
+
+- cada requisição recebe certificado A1 em trânsito pelo payload;
+- certificado, senha, base64 e XML completo não são gravados em log;
+- emissão fiscal continua bloqueada por design;
+- persistência de XML, eventos, NSU e cooldown continua sendo da vertical
+  consumidora, hoje MapOne.
+
+Para ambiente definitivo, o mesmo princípio deve ser mantido em WSGI/gunicorn:
+mais de um worker/thread pode processar DFe recebido, mas sem criar estado fiscal
+local no FiscalOne.
