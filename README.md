@@ -219,6 +219,29 @@ Regras:
 - CNPJ ICP-Brasil embutido no cert precisa bater com `cnpj_tenant`
 - Nunca loga senha, base64, PFX, PEM, token ou xml_bruto
 
+## Schemas por tipo (2026-07-12)
+
+Contratos TypedDict em `schemas/`:
+- `nfe_schema.NFeDoc`  — chNFe (44), CNPJ_emit/dest, vNF/vICMS/vIPI, cStat/xMotivo
+- `cte_schema.CTeDoc`  — chCTe (44), vTPrest, modal (rodo/aereo/aqua/ferro/duto/multi)
+- `nfse_schema.NFSeDoc` — numeroNfse (livre), CNPJ_prestador, valorServicos, `nsu` **sem zfill**
+- `envelope_lote.EnvelopeLote` — `status_lote` + contadores (recebidos/processados/persistidos/duplicados/resumos/eventos/erros)
+
+`status_xml`: COMPLETO · RESUMO · EVENTO · FALHA_PROCESSAMENTO · RECEBIDA
+`import_origin`: fiscalone_gov_fetch · fiscalone_sefaz · fiscalone_upload · fiscalone_nfse_adn · fiscalone_email · fiscalone_reparse
+`status_lote`: SUCESSO_TOTAL · SUCESSO_PARCIAL · FALHA_TOTAL · SEM_DOCUMENTO
+
+## NSU por provider (definitivo)
+
+`services/nsu_utils.normalizar_nsu(provider, doc_type, nsu)`:
+- `sefaz` / `fiscalone_sefaz` → **zfill(15)**
+- `adn_nfse` / `fiscalone_nfse_adn` → **string livre** (NUNCA zfill)
+- desconhecido → `ValueError` (erro controlado por item; nao quebra lote)
+
+## Testes
+
+    pytest tests/          # 46/46 verde
+
 ## ADRs
 
 - MAP-0017 — FiscalOne Gateway Gov (MapOne)

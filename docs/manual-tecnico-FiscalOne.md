@@ -17,13 +17,49 @@ responsabilidade da vertical. FiscalOne mantem o zero-persistencia da ADR-0035.
 
 ## 2. Modulos
 
-    /providers/sefaz_provider.py           GovProvider real: gov_fetch(payload, trace_id)
+    /schemas/                              Contratos TypedDict por tipo (nfe/cte/nfse) + envelope_lote
+    /providers/__init__.py                 GovProvider ABC — gov_fetch + consultar_dfe_nsu abstractmethods
+    /providers/sefaz_provider.py           GovProvider real (dispatcher): gov_fetch(payload, trace_id)
+    /providers/nfe_provider.py             Wrapper NF-e: parse_nfe + normalizar_nsu SEFAZ
+    /providers/cte_provider.py             Wrapper CT-e: parse_cte + normalizar_nsu SEFAZ
+    /providers/nfse_provider.py            Wrapper NFS-e: parse_nfse + normalizar_nsu ADN
     /providers/nfse_nacional_provider.py   ADN NFS-e Nacional por NSU (GET mTLS)
-    /providers/focusnfe_provider.py        Stub — implementar quando necessario
+    /providers/focusnfe_provider.py        Stub JSON estruturado — PROVIDER_NAO_IMPLEMENTADO
     /services/cert_provider.py             Resolve cert A1 por requisicao, em memoria
+    /services/nsu_utils.py                 normalizar_nsu(provider, doc_type, nsu) — regra definitiva
     /services/dfe_fetch_service.py         Rotea: nfe/cte → SEFAZ SOAP · nfse → ADN
-    /xml_parser.py                         Parseia NF-e/CT-e/MDF-e/NFS-e (recebidos)
+    /xml_parser.py                         parse_nfe/parse_cte/parse_nfse (doc_type explicito)
     /app.py                                HTTP: /fiscal/health, /documents/import, /gov/fetch
+    /tests/                                Suite pytest (46 testes)
+
+## 2b. Schemas por tipo (2026-07-12)
+
+`schemas/nfe_schema.py`, `cte_schema.py`, `nfse_schema.py` sao **TypedDicts**
+(verificacao estatica). O envelope runtime pode ter campos opcionais adicionais,
+mas os campos declarados nos TypedDicts sao contrato.
+
+Constantes compartilhadas em `schemas/__init__.py`:
+
+**`status_xml`** (Literal):
+- `COMPLETO` — XML fiscal integral parseado
+- `RESUMO` — DFe resumido (resNFe/resCTe/resEvento)
+- `EVENTO` — procEventoNFe/procEventoCTe
+- `FALHA_PROCESSAMENTO` — erro de parser/layout
+- `RECEBIDA` — DFe recebida ainda nao processada (reservado)
+
+**`import_origin`** (Literal, 6 valores aceitos):
+- `fiscalone_gov_fetch` — parse invocado pelo /fiscal/gov/fetch
+- `fiscalone_sefaz` — persistido no MapOne com origem SEFAZ
+- `fiscalone_upload` — POST /fiscal/documents/import
+- `fiscalone_nfse_adn` — NFS-e Nacional via ADN
+- `fiscalone_email` — captacao por email (MapOne)
+- `fiscalone_reparse` — reprocessamento manual (MapOne)
+
+**`status_lote`** (Literal):
+- `SUCESSO_TOTAL` — todos processados sem erro
+- `SUCESSO_PARCIAL` — >=1 sucesso + >=1 erro
+- `FALHA_TOTAL` — 0 sucesso e >=1 tentativa
+- `SEM_DOCUMENTO` — SEFAZ/ADN devolveu 0 documentos
 
 ## 2a. NFS-e Nacional via ADN (inicio operacional 2026-07-01)
 
@@ -53,6 +89,44 @@ Trata HTTP:
 
 `data_inicio` no payload e apenas metadado operacional — o FiscalOne nao filtra
 por data; ADN e por NSU. Corte real por data e responsabilidade do MapOne.
+
+## 2c. Regra definitiva de NSU por provider (2026-07-12)
+
+Toda normalizacao de NSU passa por `services/nsu_utils.normalizar_nsu`.
+`zfill` cego foi eliminado.
+
+    normalizar_nsu(provider, doc_type, nsu) -> str
+
+| Provider (`provider`)                        | Regra          | Exemplo              |
+|----------------------------------------------|----------------|----------------------|
+| `sefaz` / `fiscalone_sefaz`                  | zfill(15)      | `"123"` → `"000000000000123"` |
+| `adn_nfse` / `fiscalone_nfse_adn`            | string livre   | `"555"` → `"555"`, `""` → `"0"` |
+| qualquer outro                               | `ValueError`   | (erro controlado por item; nao quebra lote)  |
+
+Motivos:
+- SEFAZ NFeDistDFeInteresse / CTeDistDFeInteresse exigem NSU 15 digitos
+  zero-padded (spec XSD).
+- ADN NFS-e Nacional aceita NSU como string livre (path REST
+  `GET /contribuintes/DFe/{NSU}`); NUNCA aplicar zfill.
+
+## 2d. GOV_TLS_INSECURE — comportamento
+
+`GOV_TLS_INSECURE=1` desabilita verificacao de certificado servidor no
+handshake TLS. Usado APENAS para diagnostico local.
+
+Boot:
+- `logger.warning` emitido: "GOV_TLS_INSECURE=1 ativo — verificacao TLS
+  DESABILITADA. USO PROIBIDO EM PRODUCAO."
+
+Health:
+- `GET /fiscal/health` retorna:
+  ```json
+  { "tls_insecure": true,
+    "tls_warning": "GOV_TLS_INSECURE ativo — uso proibido em producao." }
+  ```
+
+`FISCAL_PROVIDER=focusnfe`:
+- `logger.warning` no boot: "stub. Todas as chamadas retornarao PROVIDER_NAO_IMPLEMENTADO."
 
 ## 3a. RESUMO x COMPLETO (Distribuicao DFe)
 
