@@ -27,6 +27,35 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 
+# ── Contrato ──────────────────────────────────────────────────────────────────
+# Versao do parser exposta em todo dict retornado (contrato MapOne).
+PARSER_VERSION = "fiscalone_xml_parser@2026-07-12"
+
+# Valores canonicos de status_xml — devem casar com schemas/__init__.StatusXml.
+STATUS_XML_COMPLETO             = "COMPLETO"
+STATUS_XML_RESUMO               = "RESUMO"
+STATUS_XML_EVENTO               = "EVENTO"
+STATUS_XML_FALHA_PROCESSAMENTO  = "FALHA_PROCESSAMENTO"
+STATUS_XML_RECEBIDA             = "RECEBIDA"
+
+
+def _falha_processamento(codigo: str, erro: str, filename: str,
+                          trace_id: str, doc_type: str | None = None) -> dict:
+    """Retorno padrao para qualquer erro de parse. status_xml sempre presente."""
+    out = {
+        "ok":             False,
+        "codigo":         codigo,
+        "erro":           erro,
+        "file":           filename,
+        "trace_id":       trace_id,
+        "status_xml":     STATUS_XML_FALHA_PROCESSAMENTO,
+        "parser_version": PARSER_VERSION,
+    }
+    if doc_type:
+        out["doc_type"] = doc_type
+    return out
+
+
 # ── utilidades numéricas / texto ──────────────────────────────────────────────
 
 def to_float(value) -> float:
@@ -855,33 +884,34 @@ def parse_xml(xml_bytes: bytes, filename: str = "",
               import_origin: str = "fiscalone_upload",
               trace_id: str = "") -> dict:
     """Parseia XML de NF-e, CT-e, MDF-e, NFS-e ou evento fiscal.
-    Retorna dict normalizado ou {"ok": False, "codigo": "PARSE_ERROR", ...}."""
+    Retorno sempre inclui `status_xml` e `parser_version` (em ok:true e ok:false).
+    """
     if not trace_id:
         trace_id = f"fo-{uuid.uuid4().hex}"
     try:
         root = _load_xml_root(xml_bytes)
     except ET.ParseError as e:
-        return {
-            "ok": False, "file": filename, "trace_id": trace_id,
-            "codigo": "PARSE_ERROR", "erro": f"XML inválido: {e}",
-        }
+        return _falha_processamento("PARSE_ERROR", f"XML invalido: {e}",
+                                     filename, trace_id)
 
     tipo = _detect_type_by_localnames(root)
     if tipo is None:
-        return {
-            "ok": False, "file": filename, "trace_id": trace_id,
-            "codigo": "PARSE_UNSUPPORTED",
-            "erro": "Tipo de documento não reconhecido (layout desconhecido)",
-            "confianca": "baixa",
-        }
+        return _falha_processamento(
+            "PARSE_UNSUPPORTED",
+            "Tipo de documento nao reconhecido (layout desconhecido)",
+            filename, trace_id,
+        )
 
     # Resumos DFe primeiro (nao sao layouts fiscais completos)
-    if tipo == "resumo_nfe":
-        return _parse_resumo_nfe(root, filename, import_origin, trace_id)
-    if tipo == "resumo_cte":
-        return _parse_resumo_cte(root, filename, import_origin, trace_id)
-    if tipo == "resumo_evento":
-        return _parse_resumo_evento(root, filename, import_origin, trace_id)
+    if tipo in ("resumo_nfe", "resumo_cte", "resumo_evento"):
+        if tipo == "resumo_nfe":
+            out = _parse_resumo_nfe(root, filename, import_origin, trace_id)
+        elif tipo == "resumo_cte":
+            out = _parse_resumo_cte(root, filename, import_origin, trace_id)
+        else:
+            out = _parse_resumo_evento(root, filename, import_origin, trace_id)
+        out.setdefault("parser_version", PARSER_VERSION)
+        return out
 
     if tipo == "nfe":
         out = _parse_nfe(root, filename, import_origin, trace_id)
@@ -897,8 +927,14 @@ def parse_xml(xml_bytes: bytes, filename: str = "",
             out = _parse_nfse_nacional(root, filename, import_origin, trace_id)
         else:
             out = _parse_nfse_abrasf(root, filename, import_origin, trace_id)
-    if isinstance(out, dict) and out.get("ok"):
-        out.setdefault("status_xml", "COMPLETO")
+    if isinstance(out, dict):
+        # EVENTO: quando o parser detectou infEvento/tpEvento
+        if out.get("ok") and out.get("type") == "evento":
+            out.setdefault("status_xml", STATUS_XML_EVENTO)
+        elif out.get("ok"):
+            out.setdefault("status_xml", STATUS_XML_COMPLETO)
+        # parser_version obrigatorio em qualquer retorno
+        out.setdefault("parser_version", PARSER_VERSION)
     return out
 
 
@@ -911,25 +947,79 @@ def parse_pdf(pdf_bytes: bytes, filename: str = "",
     try:
         txt = _extract_pdf_text(pdf_bytes)
     except RuntimeError as e:
-        return {
-            "ok": False, "file": filename, "trace_id": trace_id,
-            "codigo": "PARSE_ERROR", "erro": str(e),
-        }
+        return _falha_processamento("PARSE_ERROR", str(e), filename, trace_id, "nfse")
     except Exception as e:
-        return {
-            "ok": False, "file": filename, "trace_id": trace_id,
-            "codigo": "PARSE_ERROR", "erro": f"PDF ilegível: {e}",
-        }
+        return _falha_processamento("PARSE_ERROR", f"PDF ilegivel: {e}",
+                                     filename, trace_id, "nfse")
 
     if not txt or not txt.strip():
-        return {
-            "ok": False, "file": filename, "trace_id": trace_id,
-            "codigo": "PARSE_ERROR", "erro": "PDF sem texto extraível",
-        }
+        return _falha_processamento("PARSE_ERROR", "PDF sem texto extraivel",
+                                     filename, trace_id, "nfse")
 
-    if _looks_like_sp_nfse(txt):
-        return _parse_nfse_sp_pdf(txt, filename, import_origin, trace_id)
-    return _parse_nfse_text_generic(txt, filename, import_origin, trace_id)
+    out = (_parse_nfse_sp_pdf(txt, filename, import_origin, trace_id)
+           if _looks_like_sp_nfse(txt)
+           else _parse_nfse_text_generic(txt, filename, import_origin, trace_id))
+    if isinstance(out, dict):
+        if out.get("ok"):
+            out.setdefault("status_xml", STATUS_XML_COMPLETO)
+        out.setdefault("parser_version", PARSER_VERSION)
+    return out
+
+
+# ── APIs por tipo — roteamento por doc_type explicito ────────────────────────
+# Estas funcoes NAO inferem tipo pelo XML: exigem que o chamador declare
+# doc_type. Se o XML nao casar com o esperado, retornam FALHA_PROCESSAMENTO.
+# Uso previsto: providers/nfe_provider, cte_provider, nfse_provider.
+
+def parse_nfe(xml: str, import_origin: str = "fiscalone_gov_fetch",
+              trace_id: str = "", filename: str = "nfe.xml") -> dict:
+    """Parse NF-e com doc_type declarado. Nao infere pelo layout."""
+    xml_bytes = xml.encode("utf-8") if isinstance(xml, str) else xml
+    out = parse_xml(xml_bytes, filename, import_origin, trace_id)
+    if not out.get("ok"):
+        out["doc_type"] = "nfe"
+        return out
+    if out.get("doc_type") != "nfe":
+        return _falha_processamento(
+            "DOC_TYPE_DIVERGENTE",
+            f"esperado nfe, veio {out.get('doc_type')}",
+            filename, out.get("trace_id") or trace_id, "nfe",
+        )
+    return out
+
+
+def parse_cte(xml: str, import_origin: str = "fiscalone_gov_fetch",
+              trace_id: str = "", filename: str = "cte.xml") -> dict:
+    """Parse CT-e com doc_type declarado. Nao infere pelo layout."""
+    xml_bytes = xml.encode("utf-8") if isinstance(xml, str) else xml
+    out = parse_xml(xml_bytes, filename, import_origin, trace_id)
+    if not out.get("ok"):
+        out["doc_type"] = "cte"
+        return out
+    if out.get("doc_type") != "cte":
+        return _falha_processamento(
+            "DOC_TYPE_DIVERGENTE",
+            f"esperado cte, veio {out.get('doc_type')}",
+            filename, out.get("trace_id") or trace_id, "cte",
+        )
+    return out
+
+
+def parse_nfse(xml: str, import_origin: str = "fiscalone_nfse_adn",
+               trace_id: str = "", filename: str = "nfse.xml") -> dict:
+    """Parse NFS-e com doc_type declarado. Nao infere pelo layout."""
+    xml_bytes = xml.encode("utf-8") if isinstance(xml, str) else xml
+    out = parse_xml(xml_bytes, filename, import_origin, trace_id)
+    if not out.get("ok"):
+        out["doc_type"] = "nfse"
+        return out
+    if out.get("doc_type") not in ("nfse",):
+        return _falha_processamento(
+            "DOC_TYPE_DIVERGENTE",
+            f"esperado nfse, veio {out.get('doc_type')}",
+            filename, out.get("trace_id") or trace_id, "nfse",
+        )
+    return out
 
 
 def parse_document(data: bytes, filename: str = "",
