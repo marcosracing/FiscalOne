@@ -128,6 +128,55 @@ Health:
 `FISCAL_PROVIDER=focusnfe`:
 - `logger.warning` no boot: "stub. Todas as chamadas retornarao PROVIDER_NAO_IMPLEMENTADO."
 
+## 2e. Envelope /fiscal/gov/fetch — `acao` e `nsu_avancou` (2026-07-13)
+
+Contrato final para o MapOne decidir se atualiza NSU no CtrlOne.
+
+### Tabela — cStat SEFAZ NFeDistDFeInteresse / CTeDistDFeInteresse
+
+| cStat | Significado                              | acao          | nsu_avancou | cooldown_seg |
+|-------|------------------------------------------|---------------|-------------|--------------|
+| 138   | Documento(s) localizado(s)               | DOCUMENTOS    | true        | 0            |
+| 137   | Nenhum documento localizado              | SEM_DOCUMENTO | true        | 3600         |
+| 656   | Consumo Indevido (SEFAZ bloqueou)        | REJEITADO     | false       | 3900         |
+| 589   | NSU consultado > maxNSU                  | REJEITADO     | false       | 1            |
+| outros| qualquer outra rejeicao                  | REJEITADO     | false       | -            |
+
+### Tabela — NFS-e Nacional (ADN, sem cStat)
+
+| status                    | acao          | nsu_avancou |
+|---------------------------|---------------|-------------|
+| DOCUMENTOS_LOCALIZADOS    | DOCUMENTOS    | true        |
+| SEM_DOCUMENTO             | SEM_DOCUMENTO | true        |
+| NFSE_ADN_AUTH_ERRO        | ERRO          | false       |
+| NFSE_ADN_HTTP_ERRO        | ERRO          | false       |
+| NFSE_ADN_XML_INVALIDO     | ERRO          | false       |
+
+### Tabela — Erros tecnicos FiscalOne
+
+Qualquer codigo tecnico (CERT_*, SEFAZ_*, TLS_ERRO, PROVIDER_NAO_IMPLEMENTADO,
+ERRO_INTERNO, PAYLOAD_INVALIDO, CNPJ_INVALIDO, TIPO_NAO_SUPORTADO) sempre
+resulta em `acao=ERRO` + `nsu_avancou=false`.
+
+### Regra do MapOne
+
+    if envelope["nsu_avancou"]:
+        # atualiza op_gov_cooldown.ultimo_nsu no CtrlOne
+    else:
+        # mantem ultimo_nsu anterior; respeita cooldown_recomendado_seg
+
+**Nunca** avancar NSU quando `nsu_avancou=false`. Isso evita perda de janela
+de retentativa em cstat=656 (consumo indevido).
+
+### Campos adicionais no envelope
+
+- `acao`: DOCUMENTOS | SEM_DOCUMENTO | REJEITADO | ERRO
+- `nsu_avancou`: bool
+- `ultimo_nsu_antes`: str (eco do payload — permite auditoria)
+- `ultimo_nsu`: str (retornado pela SEFAZ/ADN)
+- `max_nsu`: str
+- `cstat` / `xmotivo` (SEFAZ) ou `status` / `status_processamento` (ADN)
+
 ## 3a. RESUMO x COMPLETO (Distribuicao DFe)
 
 Cada `docZip` retornado pela SEFAZ na `NFeDistDFeInteresse` /
