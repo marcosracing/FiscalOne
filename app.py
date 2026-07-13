@@ -71,6 +71,75 @@ def _classificar_status_lote(processados: int, persistidos: int, erros: int) -> 
     if persistidos > 0 and erros > 0:
         return "SUCESSO_PARCIAL"
     return "FALHA_TOTAL"
+
+
+# ── Classificador de acao para /fiscal/gov/fetch ─────────────────────────────
+# Tabela de cStat SEFAZ NFeDistDFeInteresse / CTeDistDFeInteresse:
+#   137 → Nenhum documento localizado (SEM_DOCUMENTO, avanca NSU)
+#   138 → Documento(s) localizado(s)  (DOCUMENTOS,    avanca NSU)
+#   589 → NSU consultado > maxNSU     (REJEITADO,     nao avanca)
+#   656 → Consumo Indevido            (REJEITADO,     nao avanca)
+#   demais rejeicoes                  (REJEITADO,     nao avanca)
+#
+# Para NFS-e Nacional (ADN, sem cStat) usamos o campo `status`:
+#   DOCUMENTOS_LOCALIZADOS → DOCUMENTOS
+#   SEM_DOCUMENTO          → SEM_DOCUMENTO
+#   AUTH/HTTP/XML erro     → REJEITADO ou ERRO
+_CSTAT_OK_SEM_DOC     = {"137"}
+_CSTAT_OK_COM_DOC     = {"138"}
+_CSTAT_REJEICAO_SEFAZ = {"656", "589", "108", "109"}
+
+_CODIGO_TECNICO_ERRO = {
+    "SEFAZ_INDISPONIVEL", "SEFAZ_HTTP_ERRO", "SEFAZ_XML_INVALIDO", "TLS_ERRO",
+    "NFSE_ADN_HTTP_ERRO", "NFSE_ADN_TIMEOUT", "NFSE_ADN_XML_INVALIDO",
+    "NFSE_ADN_AUTH_ERRO", "ERRO_INTERNO",
+    "CERT_NAO_CONFIGURADO", "CERT_BASE64_INVALIDO", "CERT_ABERTURA_FALHOU",
+    "CERT_INVALIDO", "CERT_ENV_INVALIDO", "CERT_CNPJ_DIVERGENTE",
+    "CERT_SEM_CNPJ", "CERT_FONTE_NAO_SUPORTADA",
+    "PAYLOAD_INVALIDO", "CNPJ_INVALIDO", "TIPO_NAO_SUPORTADO",
+    "PROVIDER_NAO_IMPLEMENTADO", "CNPJ_INVALIDO",
+}
+
+
+def _classificar_acao_gov_fetch(result: dict, docs_count: int) -> str:
+    """
+    Retorna: 'DOCUMENTOS' | 'SEM_DOCUMENTO' | 'REJEITADO' | 'ERRO'.
+
+    Fonte primaria: existencia de documentos no lote.
+    Fonte secundaria: cstat (SEFAZ) ou status (ADN).
+    Fonte terciaria: codigo tecnico (erro do FiscalOne ou upstream).
+    """
+    codigo = (result or {}).get("codigo")
+    cstat  = str((result or {}).get("cstat") or "").strip()
+    status = ((result or {}).get("status") or "").upper()
+
+    # Erro tecnico (FiscalOne ou upstream) → ERRO
+    if codigo in _CODIGO_TECNICO_ERRO:
+        return "ERRO"
+
+    # Documentos encontrados (via contagem OU via cstat 138 / status ADN) → DOCUMENTOS
+    if docs_count > 0:
+        return "DOCUMENTOS"
+    if cstat in _CSTAT_OK_COM_DOC:
+        return "DOCUMENTOS"
+    if status == "DOCUMENTOS_LOCALIZADOS":
+        return "DOCUMENTOS"
+
+    # Rejeicao SEFAZ (656, 589, etc) → REJEITADO
+    if cstat in _CSTAT_REJEICAO_SEFAZ:
+        return "REJEITADO"
+    # cstat presente e nao esta na lista de sucesso → REJEITADO
+    if cstat and cstat not in _CSTAT_OK_SEM_DOC and cstat not in _CSTAT_OK_COM_DOC:
+        return "REJEITADO"
+
+    # Sucesso sem documento (cstat 137, status SEM_DOCUMENTO, ou nada retornado)
+    return "SEM_DOCUMENTO"
+
+
+def _nsu_avancou(acao: str) -> bool:
+    """NSU avanca APENAS em DOCUMENTOS e SEM_DOCUMENTO. MapOne usa isso
+    como sinal para PUT no CtrlOne."""
+    return acao in ("DOCUMENTOS", "SEM_DOCUMENTO")
 _PROD_AMBIENTES = {"prod", "producao", "produção", "production"}
 _TRUE_VALUES = {"1", "true", "yes", "sim", "on"}
 
@@ -171,9 +240,18 @@ def _log_stdout(operacao, resultado, trace_id, **kwargs):
         "cnpj":        kwargs.get("company_cnpj"),
         "doc_type":    kwargs.get("doc_type"),
         "chave":       kwargs.get("chave_doc"),
+        # Campos novos para gov_fetch (MapOne consome via journal/stdout)
+        "cstat":            kwargs.get("cstat"),
+        "acao":             kwargs.get("acao"),
+        "ultimo_nsu_antes": kwargs.get("ultimo_nsu_antes"),
+        "ultimo_nsu":       kwargs.get("ultimo_nsu"),
+        "max_nsu":          kwargs.get("max_nsu"),
+        "nsu_avancou":      kwargs.get("nsu_avancou"),
         "duracao_ms":  kwargs.get("duracao_ms"),
         "erro":        kwargs.get("erro_msg"),
     }
+    # Filtro: mantem False (nsu_avancou pode ser false — precisa aparecer),
+    # remove apenas None.
     entry = {k: v for k, v in entry.items() if v is not None}
     try:
         print(json.dumps(entry, ensure_ascii=False), flush=True)
@@ -447,12 +525,6 @@ def gov_fetch():
         }), 500
 
     duracao_ms = int((time.monotonic() - t0) * 1000)
-    resultado_log = "ok" if result.get("ok") else "erro"
-    _log_stdout("gov_fetch", resultado_log, trace_id,
-                source_system=source_system,
-                company_cnpj=cnpj_tenant, doc_type=tipo,
-                duracao_ms=duracao_ms,
-                erro_msg=result.get("codigo") if not result.get("ok") else None)
 
     docs_arr    = result.get("documentos") or []
     resumos_arr = result.get("resumos") or []
@@ -465,10 +537,20 @@ def gov_fetch():
     erros_n     = len(erros_arr)
     processados = persistidos + resumos_n + erros_n
 
+    # Classificacao definitiva para MapOne — decide se atualiza NSU no CtrlOne.
+    docs_efetivos    = persistidos + resumos_n + eventos_n
+    acao             = _classificar_acao_gov_fetch(result, docs_efetivos)
+    nsu_avancou      = _nsu_avancou(acao)
+    ultimo_nsu_antes = (payload.get("ultimo_nsu") or "0")
+    ultimo_nsu_pos   = result.get("ultimo_nsu")
+    max_nsu          = result.get("max_nsu")
+
     envelope = {
         "ok":                       bool(result.get("ok")),
         "trace_id":                 trace_id,
         "codigo":                   result.get("codigo"),
+        "acao":                     acao,
+        "nsu_avancou":              nsu_avancou,
         "status_lote":              _classificar_status_lote(processados, persistidos, erros_n),
         "recebidos":                processados,
         "processados":              processados,
@@ -483,8 +565,9 @@ def gov_fetch():
         "ambiente_adn":             result.get("ambiente_adn"),
         "status":                   result.get("status"),
         "status_processamento":     result.get("status_processamento"),
-        "ultimo_nsu":               result.get("ultimo_nsu"),
-        "max_nsu":                  result.get("max_nsu"),
+        "ultimo_nsu_antes":         ultimo_nsu_antes,
+        "ultimo_nsu":               ultimo_nsu_pos,
+        "max_nsu":                  max_nsu,
         "cooldown_recomendado_seg": result.get("cooldown_recomendado_seg"),
         "documentos":               docs_arr,
         "resumos":                  resumos_arr,
@@ -499,6 +582,20 @@ def gov_fetch():
     }
     _ARRAY_KEYS = ("documentos", "resumos", "erros", "results")
     envelope = {k: v for k, v in envelope.items() if v is not None or k in _ARRAY_KEYS or k == "ok"}
+
+    # Log operacional: cstat, acao, ultimo_nsu_antes, max_nsu, nsu_avancou.
+    resultado_log = "ok" if result.get("ok") else "erro"
+    _log_stdout("gov_fetch", resultado_log, trace_id,
+                source_system=source_system,
+                company_cnpj=cnpj_tenant, doc_type=tipo,
+                cstat=envelope.get("cstat"),
+                acao=acao,
+                ultimo_nsu_antes=ultimo_nsu_antes,
+                ultimo_nsu=ultimo_nsu_pos,
+                max_nsu=max_nsu,
+                nsu_avancou=nsu_avancou,
+                duracao_ms=duracao_ms,
+                erro_msg=result.get("codigo") if not result.get("ok") else None)
 
     status = 200 if envelope["ok"] else _status_para_codigo(envelope.get("codigo"))
     return jsonify(envelope), status
