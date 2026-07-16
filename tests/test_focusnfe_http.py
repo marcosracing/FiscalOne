@@ -19,6 +19,7 @@ from providers.focusnfe_provider import (
     FocusNFeProvider,
     _basic_auth_header,
     _mapear_nfe_focus,
+    _normalizar_base_url,
     _resolve_base_url,
     _sanitize_focus_item,
     _dump_focus_json,
@@ -62,32 +63,61 @@ class TestBasicAuthHeader:
         assert h["Authorization"].startswith("Basic ")
 
 
-# ── _resolve_base_url ───────────────────────────────────────────────────────
-class TestResolveBaseUrl:
-    def test_env_base_url_ganha(self, monkeypatch):
-        monkeypatch.setenv("FOCUSNFE_BASE_URL", "https://custom.example.com/v2")
-        assert _resolve_base_url("producao") == "https://custom.example.com/v2"
+# ── _normalizar_base_url ────────────────────────────────────────────────────
+class TestNormalizarBaseUrl:
+    """Aceita a base oficial COM ou SEM `/v2` — evita `/v2/v2` na montagem."""
 
-    def test_env_base_url_remove_barra_final(self, monkeypatch):
+    def test_sem_v2(self):
+        assert _normalizar_base_url("https://api.focusnfe.com.br") == "https://api.focusnfe.com.br"
+
+    def test_com_v2(self):
+        assert _normalizar_base_url("https://api.focusnfe.com.br/v2") == "https://api.focusnfe.com.br"
+
+    def test_com_v2_e_barra(self):
+        assert _normalizar_base_url("https://api.focusnfe.com.br/v2/") == "https://api.focusnfe.com.br"
+
+    def test_barra_final(self):
+        assert _normalizar_base_url("https://api.focusnfe.com.br/") == "https://api.focusnfe.com.br"
+
+    def test_vazio(self):
+        assert _normalizar_base_url("") == ""
+
+    def test_none(self):
+        assert _normalizar_base_url(None) == ""
+
+
+# ── _resolve_base_url ───────────────────────────────────────────────────────
+# CONTRATO Fase 2 HTTP corretiva: retorna base SEM `/v2` — a rota (`nfes_recebidas`)
+# concatena `/v2/...` explicitamente para evitar `/v2/v2`.
+class TestResolveBaseUrl:
+    def test_env_base_url_com_v2_normaliza(self, monkeypatch):
+        monkeypatch.setenv("FOCUSNFE_BASE_URL", "https://custom.example.com/v2")
+        assert _resolve_base_url("producao") == "https://custom.example.com"
+
+    def test_env_base_url_sem_v2_preservado(self, monkeypatch):
+        monkeypatch.setenv("FOCUSNFE_BASE_URL", "https://custom.example.com")
+        assert _resolve_base_url("producao") == "https://custom.example.com"
+
+    def test_env_base_url_com_v2_e_barra(self, monkeypatch):
         monkeypatch.setenv("FOCUSNFE_BASE_URL", "https://custom.example.com/v2/")
-        assert _resolve_base_url("producao") == "https://custom.example.com/v2"
+        assert _resolve_base_url("producao") == "https://custom.example.com"
 
     def test_producao_default(self, monkeypatch):
         monkeypatch.delenv("FOCUSNFE_BASE_URL", raising=False)
-        assert _resolve_base_url("producao") == "https://api.focusnfe.com.br/v2"
+        assert _resolve_base_url("producao") == "https://api.focusnfe.com.br"
 
     def test_homologacao_default(self, monkeypatch):
         monkeypatch.delenv("FOCUSNFE_BASE_URL", raising=False)
-        assert _resolve_base_url("homologacao") == "https://homologacao.focusnfe.com.br/v2"
+        assert _resolve_base_url("homologacao") == "https://homologacao.focusnfe.com.br"
 
     def test_ambiente_desconhecido_cai_homologacao(self, monkeypatch):
         monkeypatch.delenv("FOCUSNFE_BASE_URL", raising=False)
-        assert _resolve_base_url("marte") == "https://homologacao.focusnfe.com.br/v2"
+        assert _resolve_base_url("marte") == "https://homologacao.focusnfe.com.br"
 
     def test_none_usa_env_ou_homologacao(self, monkeypatch):
         monkeypatch.delenv("FOCUSNFE_BASE_URL", raising=False)
         monkeypatch.delenv("FOCUSNFE_AMBIENTE", raising=False)
-        assert _resolve_base_url(None) == "https://homologacao.focusnfe.com.br/v2"
+        assert _resolve_base_url(None) == "https://homologacao.focusnfe.com.br"
 
 
 # ── _sanitize_focus_item ────────────────────────────────────────────────────
@@ -237,6 +267,54 @@ class TestGovFetchSucesso:
         # header Authorization esta presente mas nunca vaza para envelope
         assert "Authorization" in kwargs["headers"]
         assert kwargs["headers"]["Authorization"].startswith("Basic ")
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_url_com_env_base_sem_v2(self, mock_get, monkeypatch):
+        """FOCUSNFE_BASE_URL=https://api.focusnfe.com.br (SEM /v2) gera
+        `.../v2/nfes_recebidas` corretamente."""
+        monkeypatch.setenv("FOCUSNFE_TOKEN", "abc123")
+        monkeypatch.setenv("FOCUSNFE_BASE_URL", "https://api.focusnfe.com.br")
+        p = FocusNFeProvider()
+        mock_get.return_value = _mock_resp(status=200, headers={}, json_data=[])
+        p.gov_fetch({"cnpj": "07219398000109", "tipo": "nfe",
+                     "ultimo_nsu": "0"}, "fo-t")
+        assert mock_get.call_args.args[0] == "https://api.focusnfe.com.br/v2/nfes_recebidas"
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_url_com_env_base_com_v2_nao_gera_v2_duplicado(self, mock_get, monkeypatch):
+        """FOCUSNFE_BASE_URL=https://api.focusnfe.com.br/v2 (COM /v2) NAO gera
+        `.../v2/v2/...` — normalizacao remove o sufixo antes da concatenacao."""
+        monkeypatch.setenv("FOCUSNFE_TOKEN", "abc123")
+        monkeypatch.setenv("FOCUSNFE_BASE_URL", "https://api.focusnfe.com.br/v2")
+        p = FocusNFeProvider()
+        mock_get.return_value = _mock_resp(status=200, headers={}, json_data=[])
+        p.gov_fetch({"cnpj": "07219398000109", "tipo": "nfe",
+                     "ultimo_nsu": "0"}, "fo-t")
+        url = mock_get.call_args.args[0]
+        assert url == "https://api.focusnfe.com.br/v2/nfes_recebidas"
+        assert "/v2/v2/" not in url
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_url_com_env_base_com_v2_e_barra_final(self, mock_get, monkeypatch):
+        monkeypatch.setenv("FOCUSNFE_TOKEN", "abc123")
+        monkeypatch.setenv("FOCUSNFE_BASE_URL", "https://api.focusnfe.com.br/v2/")
+        p = FocusNFeProvider()
+        mock_get.return_value = _mock_resp(status=200, headers={}, json_data=[])
+        p.gov_fetch({"cnpj": "07219398000109", "tipo": "nfe",
+                     "ultimo_nsu": "0"}, "fo-t")
+        assert mock_get.call_args.args[0] == "https://api.focusnfe.com.br/v2/nfes_recebidas"
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_url_homologacao_default(self, mock_get, monkeypatch):
+        """Sem FOCUSNFE_BASE_URL e sem ambiente no payload → homologacao."""
+        monkeypatch.setenv("FOCUSNFE_TOKEN", "abc123")
+        monkeypatch.delenv("FOCUSNFE_BASE_URL", raising=False)
+        monkeypatch.delenv("FOCUSNFE_AMBIENTE", raising=False)
+        p = FocusNFeProvider()
+        mock_get.return_value = _mock_resp(status=200, headers={}, json_data=[])
+        p.gov_fetch({"cnpj": "07219398000109", "tipo": "nfe",
+                     "ultimo_nsu": "0"}, "fo-t")
+        assert mock_get.call_args.args[0] == "https://homologacao.focusnfe.com.br/v2/nfes_recebidas"
 
 
 # ── gov_fetch — validacoes ──────────────────────────────────────────────────
@@ -437,6 +515,31 @@ class TestBaixarDanfe:
         assert r["ok"] is True
         assert r["bytes"] == pdf
         assert r["mime"] == "application/pdf"
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_danfe_url_com_env_base_com_v2_nao_gera_v2_duplicado(self, mock_get, monkeypatch):
+        """DANFE tambem nao pode gerar `/v2/v2/nfes_recebidas/{chave}.pdf`."""
+        monkeypatch.setenv("FOCUSNFE_TOKEN", "abc123")
+        monkeypatch.setenv("FOCUSNFE_BASE_URL", "https://api.focusnfe.com.br/v2")
+        p = FocusNFeProvider()
+        pdf = b"%PDF"
+        mock_get.return_value = _mock_resp(
+            status=200, headers={"Content-Type": "application/pdf"}, content=pdf)
+        p.baixar_danfe("A" * 44)
+        url = mock_get.call_args.args[0]
+        assert url == "https://api.focusnfe.com.br/v2/nfes_recebidas/" + "A" * 44 + ".pdf"
+        assert "/v2/v2/" not in url
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_danfe_url_com_env_base_sem_v2(self, mock_get, monkeypatch):
+        monkeypatch.setenv("FOCUSNFE_TOKEN", "abc123")
+        monkeypatch.setenv("FOCUSNFE_BASE_URL", "https://api.focusnfe.com.br")
+        p = FocusNFeProvider()
+        pdf = b"%PDF"
+        mock_get.return_value = _mock_resp(
+            status=200, headers={"Content-Type": "application/pdf"}, content=pdf)
+        p.baixar_danfe("A" * 44)
+        assert mock_get.call_args.args[0] == "https://api.focusnfe.com.br/v2/nfes_recebidas/" + "A" * 44 + ".pdf"
 
     @patch("providers.focusnfe_provider.requests.get")
     def test_segundo_get_403(self, mock_get, provider_com_token):

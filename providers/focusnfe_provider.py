@@ -56,22 +56,38 @@ def _basic_auth_header(token: str) -> dict:
 
 
 # ── Helpers de configuracao ───────────────────────────────────────────────────
+# Bases oficiais sem `/v2`. O prefixo `/v2` e concatenado nas rotas para
+# garantir montagem correta independente de como FOCUSNFE_BASE_URL for
+# fornecido pelo operador (com ou sem `/v2` no final).
 _FOCUSNFE_HOSTS = {
-    "producao":     "https://api.focusnfe.com.br/v2",
-    "homologacao":  "https://homologacao.focusnfe.com.br/v2",
+    "producao":     "https://api.focusnfe.com.br",
+    "homologacao":  "https://homologacao.focusnfe.com.br",
 }
 
 
+def _normalizar_base_url(base_url: str) -> str:
+    """Remove barra final e sufixo `/v2` para garantir montagem correta.
+
+    Aceita `FOCUSNFE_BASE_URL` com ou sem `/v2` no final; a concatenacao
+    das rotas sempre adiciona `/v2/...`, entao esta normalizacao evita
+    `/v2/v2` no cenario em que o operador incluir `/v2` no env.
+    """
+    url = (base_url or "").strip().rstrip("/")
+    if url.endswith("/v2"):
+        url = url[:-3].rstrip("/")
+    return url
+
+
 def _resolve_base_url(env_ambiente: str | None = None) -> str:
-    """Base URL do FocusNFe.
+    """Base URL do FocusNFe (SEM `/v2` — adicionado na montagem da rota).
 
     Regras:
-      1. Se FOCUSNFE_BASE_URL estiver definido, usa esse valor (rstrip('/')).
-      2. Senao, usa mapa ambiente → host. Default seguro: homologacao.
+      1. Se FOCUSNFE_BASE_URL estiver definido, usa esse valor normalizado.
+      2. Senao, usa mapa ambiente → host oficial. Default seguro: homologacao.
     """
     base = os.environ.get("FOCUSNFE_BASE_URL", "").strip()
     if base:
-        return base.rstrip("/")
+        return _normalizar_base_url(base)
     amb = (env_ambiente or os.environ.get("FOCUSNFE_AMBIENTE") or "homologacao").strip().lower()
     return _FOCUSNFE_HOSTS.get(amb, _FOCUSNFE_HOSTS["homologacao"])
 
@@ -231,8 +247,9 @@ class FocusNFeProvider(GovProvider):
         return self._token
 
     def _base_url_for(self, ambiente: str | None) -> str:
+        """Retorna a base URL SEM `/v2` — a concatenacao das rotas adiciona."""
         if self._base_url_env:
-            return self._base_url_env.rstrip("/")
+            return _normalizar_base_url(self._base_url_env)
         return _resolve_base_url(ambiente)
 
     # ── gov_fetch — HTTP real ──────────────────────────────────────────────
@@ -280,7 +297,7 @@ class FocusNFeProvider(GovProvider):
             )
 
         base_url = self._base_url_for(ambiente)
-        url = f"{base_url}/nfes_recebidas"
+        url = f"{base_url}/v2/nfes_recebidas"
         headers = {
             **_basic_auth_header(token),
             "Accept": "application/json",
@@ -476,7 +493,7 @@ class FocusNFeProvider(GovProvider):
                 "erro":     str(exc),
             }
         base_url = self._base_url_for(ambiente)
-        url = f"{base_url}/nfes_recebidas/{chave}.pdf"
+        url = f"{base_url}/v2/nfes_recebidas/{chave}.pdf"
         headers_auth = {**_basic_auth_header(token), "Accept": "application/pdf"}
         try:
             resp = requests.get(url, headers=headers_auth, allow_redirects=False,

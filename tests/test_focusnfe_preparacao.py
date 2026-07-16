@@ -114,21 +114,29 @@ class TestInitSemFailFast:
         p = FocusNFeProvider()
         assert p._token == "abc123456"
 
-    def test_base_url_remove_barra_final(self, monkeypatch):
-        # Fase 2 HTTP: resolucao lazy via _base_url_for(). _base_url_env guarda
-        # o valor bruto; a normalizacao (rstrip /) acontece no metodo.
+    def test_base_url_normaliza_com_v2_e_barra(self, monkeypatch):
+        # Fase 2 HTTP corretiva: _base_url_for() retorna SEM `/v2` — a
+        # rota (`nfes_recebidas`) concatena `/v2/...`. Isso evita `/v2/v2`
+        # quando o operador fornecer FOCUSNFE_BASE_URL COM `/v2` no final.
         monkeypatch.setenv("FOCUSNFE_BASE_URL", "https://x.example.com/v2/")
         p = FocusNFeProvider()
-        assert p._base_url_for("producao") == "https://x.example.com/v2"
+        assert p._base_url_for("producao") == "https://x.example.com"
+
+    def test_base_url_sem_v2_preservada(self, monkeypatch):
+        # FOCUSNFE_BASE_URL fornecida SEM `/v2` (formato oficial) tambem funciona.
+        monkeypatch.setenv("FOCUSNFE_BASE_URL", "https://x.example.com")
+        p = FocusNFeProvider()
+        assert p._base_url_for("producao") == "https://x.example.com"
 
     def test_base_url_default_sem_env(self, monkeypatch):
-        # Fase 2 HTTP: default seguro passou a ser homologacao (nao producao).
-        # Producao so via FOCUSNFE_BASE_URL explicito ou ambiente='producao'.
+        # Default seguro: homologacao (nao producao). Producao so via
+        # FOCUSNFE_BASE_URL explicito ou ambiente='producao' no payload.
+        # Retorno SEM `/v2` — rota adiciona.
         monkeypatch.delenv("FOCUSNFE_BASE_URL", raising=False)
         monkeypatch.delenv("FOCUSNFE_AMBIENTE", raising=False)
         p = FocusNFeProvider()
-        assert p._base_url_for(None) == "https://homologacao.focusnfe.com.br/v2"
-        assert p._base_url_for("producao") == "https://api.focusnfe.com.br/v2"
+        assert p._base_url_for(None) == "https://homologacao.focusnfe.com.br"
+        assert p._base_url_for("producao") == "https://api.focusnfe.com.br"
 
     def test_timeout_invalido_cai_para_30(self, monkeypatch):
         monkeypatch.setenv("FOCUSNFE_TIMEOUT", "nao-e-numero")

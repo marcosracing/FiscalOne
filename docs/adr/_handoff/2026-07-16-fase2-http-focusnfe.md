@@ -110,18 +110,36 @@ Suite pré-existente sem regressão. Zero chamada HTTP real disparada (todos os 
 
 ## Próxima fase — Fase 3 MapOne
 
-Prep MapOne para consumir Focus como provider ativo:
+Pendências reais (as tarefas de provider ativo, resolver, UI de cadastro e
+interceptação dos 3 pontos hardcoded **já foram entregues no MapOne nas
+Fases 0C/1** — `prov_fiscal_provider_ativo`, `_resolve_fiscal_provider_ativo`,
+UI de conexão FocusNFe, menu Administração > Integrações). O que falta:
 
-1. Migration `049_expand_import_origin_focusnfe.sql` — expandir CHECK de `op_fiscal_xml.import_origin` para incluir `fiscalone_focusnfe`.
-2. Migration `050_prov_fiscal_provider_ativo.sql` — nova tabela `(tenant_id, cnpj, doc_type, provider)` com UNIQUE `(tenant_id, cnpj, doc_type)`.
-3. Helper `_resolve_fiscal_provider_ativo(tenant_id, cnpj, doc_type)` em `logione/services/`.
-4. Interceptar 3 pontos que hoje passam `provider="sefaz"` hardcoded:
-   - `app.py:5804-5809` (POST /fiscal/api/buscar-dfe)
-   - `scripts/dfe_sync.py:182-183`
-   - `integrations/fiscalone_client.py:161`
-5. UI de cadastro de conexão Focus (fork do CTASmart: `templates/administracao/integracoes_ctasmart.html` + `app.py:1098-1279`).
-6. Migration `051_op_fiscal_danfe.sql` — nova tabela `(tenant_id, chave, danfe_blob BLOB, danfe_sha256, ...)` com padrão `prov_pessoa_documento`.
-7. Endpoint `/fiscal/api/danfe/<chave>` — dispara `provider.baixar_danfe()` e persiste BLOB no MapOne.
+1. **MapOne consumir `FocusNFeProvider`** quando `provider_ativo == 'focusnfe'`
+   para o par `(tenant, cnpj, doc_type)` — plugar no fluxo existente de
+   `buscar_dfe` que já resolve o provider via helper.
+2. **Persistir XML Focus** em `op_fiscal_xml` via gateway multiBanco
+   (Oracle/PG), respeitando `import_origin='fiscalone_focusnfe'` (validar
+   se o CHECK/allowlist já aceita o valor no banco físico — se ainda não,
+   migration adicional necessária).
+3. **Persistir DANFE PDF** em tabela dedicada (padrão `prov_pessoa_documento`
+   já estabelecido no MapOne — BLOB + sha256 + metadados) via gateway
+   multiBanco. Endpoint que dispara `provider.baixar_danfe()` no lado do
+   MapOne, com o FiscalOne apenas roteando.
+4. **Atualização transacional do cursor `versao`** no CtrlOne apenas após
+   confirmação de persistência bem-sucedida no MapOne. Sem `nsu_avancou=true`,
+   não incrementa cursor no CtrlOne (evita perda de lote se persistência
+   quebrar meio-caminho).
+5. **CHECK/allowlist de `import_origin`** — validar se o banco físico do
+   MapOne já aceita `fiscalone_focusnfe`. Se não, migration portável PG/Oracle
+   (via gateway multiBanco) expandindo a allowlist.
+6. **Idempotência por `(chave_nfe, provider, versão)`** — evitar reinserção
+   se um lote for reprocessado (cursor rebobinado ou retry). Chave lógica
+   composta na tabela de destino.
+7. **Autocadastro de fornecedor/cliente** a partir de emit/dest do XML
+   Focus (COMPLETO) e dos campos resumo (`emit_nome`, `CNPJ_emit`,
+   `CNPJ_dest`) no caso `status_xml=RESUMO` — reusando os fluxos de
+   autocadastro já existentes no MapOne.
 
 ## Status
 
