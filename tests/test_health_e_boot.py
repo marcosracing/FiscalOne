@@ -45,17 +45,19 @@ class TestHealthTlsInsecure:
 
 
 class TestBootWarnings:
-    def test_focusnfe_gera_warning_e_501(self, cliente_focusnfe):
+    def test_focusnfe_sem_token_devolve_400_estruturado(self, cliente_focusnfe, monkeypatch):
+        """Fase 2 HTTP: gov_fetch agora e real. Sem FOCUSNFE_TOKEN, rota
+        devolve 400 com codigo FOCUS_TOKEN_AUSENTE (nao mais 501)."""
         cli, app_mod = cliente_focusnfe
-        # Warning no boot — comportamento observavel via /health
+        # Garantir que o token nao esta setado ao instanciar o provider.
+        monkeypatch.delenv("FOCUSNFE_TOKEN", raising=False)
         assert app_mod.FISCAL_PROVIDER == "focusnfe"
-        # E rota gov/fetch devolve 501 PROVIDER_NAO_IMPLEMENTADO
         r = cli.post("/fiscal/gov/fetch", json={
             "cnpj_tenant": "07219398000109",
             "ambiente": "homologacao",
             "tipo": "nfe",
             "ultimo_nsu": "0",
         })
-        assert r.status_code == 501
+        assert r.status_code == 400
         j = r.get_json()
-        assert j["codigo"] == "PROVIDER_NAO_IMPLEMENTADO"
+        assert j["codigo"] == "FOCUS_TOKEN_AUSENTE"

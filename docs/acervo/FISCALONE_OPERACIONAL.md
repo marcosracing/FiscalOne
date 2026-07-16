@@ -60,3 +60,13 @@ Limites preservados:
 - Schemas expandidos: `ImportOrigin += "fiscalone_focusnfe"`; `NFeDocOpcional` inclui `versao`, `raw_json_focus`, `danfe_sha256`, `danfe_fonte`.
 - `gov_fetch`/`consultar_dfe_nsu` seguem stub — Fase 2 HTTP separada.
 - Nenhuma alteração em MapOne/CtrlOne/LegalOne. Sem HTTP real. Sem push. Sem deploy.
+
+## Fase 2 HTTP — 2026-07-16 (FocusNFeProvider real, testes mockados)
+
+- `gov_fetch()` real: `GET /v2/nfes_recebidas?cnpj=&versao=`, HTTP Basic `base64(token:)`, cursor via `X-Max-Version`.
+- `consultar_dfe_nsu()` delega para `gov_fetch()`; `baixar_danfe()` com 302 sem Authorization no segundo GET.
+- 11 códigos Focus (`FOCUS_*` e `DANFE_*`) mapeados para HTTP status em `app.py::_status_para_codigo`.
+- Envelope canônico com `documentos`, `resumos`, `erros`, `ultimo_nsu`, `max_nsu`, `cursor_tipo=versao`, `nsu_avancou`.
+- Item inválido no lote não derruba os demais.
+- Segurança: token nunca em log/envelope/raw_json_focus; segundo GET DANFE sem Authorization (validado por teste).
+- 142/142 testes passam. 51 novos em `test_focusnfe_http.py`. Zero HTTP real. Sem push. Sem deploy.

@@ -1,4 +1,5 @@
-"""Contrato do GovProvider ABC + FocusNFeProvider PROVIDER_NAO_IMPLEMENTADO."""
+"""Contrato do GovProvider ABC + FocusNFeProvider (Fase 2 HTTP — sem token vira FOCUS_TOKEN_AUSENTE)."""
+import os
 import pytest
 from providers import GovProvider
 from providers.focusnfe_provider import FocusNFeProvider
@@ -15,32 +16,40 @@ class TestGovProviderABC:
         assert "consultar_dfe_nsu" in GovProvider.__abstractmethods__
 
 
-class TestFocusNFeStub:
-    """Nao pode ter caminho silencioso. Sempre PROVIDER_NAO_IMPLEMENTADO."""
+class TestFocusNFeSemToken:
+    """Sem token, provider retorna envelope estruturado FOCUS_TOKEN_AUSENTE.
 
-    def setup_method(self):
-        self.p = FocusNFeProvider()
+    Fase 2 HTTP: gov_fetch nao e mais stub; sem token, falha localmente
+    com envelope controlado antes de qualquer HTTP.
+    """
 
-    def test_gov_fetch_estruturado(self):
-        r = self.p.gov_fetch({"cnpj_tenant": "07219398000109", "tipo": "nfe"}, "fo-t")
+    def test_gov_fetch_sem_token_retorna_erro_estruturado(self, monkeypatch):
+        monkeypatch.delenv("FOCUSNFE_TOKEN", raising=False)
+        p = FocusNFeProvider()
+        r = p.gov_fetch({"cnpj": "07219398000109", "tipo": "nfe"}, "fo-t")
         assert r["ok"] is False
-        assert r["codigo"] == "PROVIDER_NAO_IMPLEMENTADO"
+        assert r["codigo"] == "FOCUS_TOKEN_AUSENTE"
         assert r["provider"] == "focusnfe"
         assert r["trace_id"] == "fo-t"
-        assert "Provider nao implementa" in r["erro"]
+        assert "FOCUSNFE_TOKEN" in r["erro"]
 
-    def test_consultar_dfe_nsu_estruturado(self):
-        r = self.p.consultar_dfe_nsu(b"", b"", "00", "0", "homologacao", "fo-t")
+    def test_consultar_dfe_nsu_delega_para_gov_fetch(self, monkeypatch):
+        monkeypatch.delenv("FOCUSNFE_TOKEN", raising=False)
+        p = FocusNFeProvider()
+        r = p.consultar_dfe_nsu(b"", b"", "07219398000109", "0", "homologacao", "fo-t")
         assert r["ok"] is False
-        assert r["codigo"] == "PROVIDER_NAO_IMPLEMENTADO"
+        assert r["codigo"] == "FOCUS_TOKEN_AUSENTE"
 
-    def test_nao_vaza_token(self):
-        """Envelope nao deve conter FOCUSNFE_TOKEN, base_url completo, etc."""
-        r = self.p.gov_fetch({}, "fo-t")
-        payload = str(r)
-        assert "token" not in payload.lower()
-        assert "focusnfe.com.br" not in payload.lower()
-        assert "password" not in payload.lower()
+    def test_nao_vaza_token_em_envelope_sem_token(self, monkeypatch):
+        """Envelope nao deve conter authorization, base64, senha, api_key."""
+        monkeypatch.delenv("FOCUSNFE_TOKEN", raising=False)
+        p = FocusNFeProvider()
+        r = p.gov_fetch({"cnpj": "07219398000109", "tipo": "nfe"}, "fo-t")
+        payload = str(r).lower()
+        assert "authorization" not in payload
+        assert "password" not in payload
+        assert "api_key" not in payload
+        assert "basic " not in payload
 
 
 class TestSefazProviderCompleto:

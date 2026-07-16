@@ -70,28 +70,35 @@ class TestEmissaoBloqueada:
         assert issubclass(EmissaoProibida, RuntimeError)
 
 
-# ── gov_fetch / consultar_dfe_nsu continuam stub ────────────────────────────
-class TestStubsPreservados:
-    def setup_method(self):
-        self.p = FocusNFeProvider()
+# ── gov_fetch / consultar_dfe_nsu — Fase 2 HTTP (sem token = FOCUS_TOKEN_AUSENTE) ─
+class TestSemTokenErroEstruturado:
+    """Fase 2 HTTP: gov_fetch nao e mais stub. Sem token, falha localmente
+    com envelope FOCUS_TOKEN_AUSENTE antes de qualquer HTTP."""
 
-    def test_gov_fetch_ainda_stub(self):
-        r = self.p.gov_fetch({"cnpj_tenant": "07219398000109"}, "fo-t")
+    def test_gov_fetch_sem_token(self, monkeypatch):
+        monkeypatch.delenv("FOCUSNFE_TOKEN", raising=False)
+        p = FocusNFeProvider()
+        r = p.gov_fetch({"cnpj": "07219398000109", "tipo": "nfe"}, "fo-t")
         assert r["ok"] is False
-        assert r["codigo"] == "PROVIDER_NAO_IMPLEMENTADO"
+        assert r["codigo"] == "FOCUS_TOKEN_AUSENTE"
         assert r["provider"] == "focusnfe"
         assert r["trace_id"] == "fo-t"
 
-    def test_consultar_dfe_nsu_ainda_stub(self):
-        r = self.p.consultar_dfe_nsu(b"", b"", "00", "0", "homologacao", "fo-t")
+    def test_consultar_dfe_nsu_delega_e_falha_sem_token(self, monkeypatch):
+        # consultar_dfe_nsu agora delega para gov_fetch (Fase 2 HTTP).
+        monkeypatch.delenv("FOCUSNFE_TOKEN", raising=False)
+        p = FocusNFeProvider()
+        r = p.consultar_dfe_nsu(b"", b"", "07219398000109", "0", "homologacao", "fo-t")
         assert r["ok"] is False
-        assert r["codigo"] == "PROVIDER_NAO_IMPLEMENTADO"
+        assert r["codigo"] == "FOCUS_TOKEN_AUSENTE"
 
-    def test_metodos_nao_emissao_permanecem_stub(self):
+    def test_metodos_nao_emissao_permanecem_stub(self, monkeypatch):
         # cancelar/encerrar/incluir_condutor NAO sao emitir_* — continuam stub
-        assert self.p.cancelar_cte("x", "y")["codigo"] == "PROVIDER_NAO_IMPLEMENTADO"
-        assert self.p.encerrar_mdfe("x")["codigo"] == "PROVIDER_NAO_IMPLEMENTADO"
-        assert self.p.incluir_condutor_mdfe("x", {})["codigo"] == "PROVIDER_NAO_IMPLEMENTADO"
+        monkeypatch.delenv("FOCUSNFE_TOKEN", raising=False)
+        p = FocusNFeProvider()
+        assert p.cancelar_cte("x", "y")["codigo"] == "PROVIDER_NAO_IMPLEMENTADO"
+        assert p.encerrar_mdfe("x")["codigo"] == "PROVIDER_NAO_IMPLEMENTADO"
+        assert p.incluir_condutor_mdfe("x", {})["codigo"] == "PROVIDER_NAO_IMPLEMENTADO"
 
 
 # ── __init__ e leitura segura de envs ───────────────────────────────────────
@@ -108,14 +115,20 @@ class TestInitSemFailFast:
         assert p._token == "abc123456"
 
     def test_base_url_remove_barra_final(self, monkeypatch):
+        # Fase 2 HTTP: resolucao lazy via _base_url_for(). _base_url_env guarda
+        # o valor bruto; a normalizacao (rstrip /) acontece no metodo.
         monkeypatch.setenv("FOCUSNFE_BASE_URL", "https://x.example.com/v2/")
         p = FocusNFeProvider()
-        assert p._base_url == "https://x.example.com/v2"
+        assert p._base_url_for("producao") == "https://x.example.com/v2"
 
     def test_base_url_default_sem_env(self, monkeypatch):
+        # Fase 2 HTTP: default seguro passou a ser homologacao (nao producao).
+        # Producao so via FOCUSNFE_BASE_URL explicito ou ambiente='producao'.
         monkeypatch.delenv("FOCUSNFE_BASE_URL", raising=False)
+        monkeypatch.delenv("FOCUSNFE_AMBIENTE", raising=False)
         p = FocusNFeProvider()
-        assert p._base_url == "https://api.focusnfe.com.br/v2"
+        assert p._base_url_for(None) == "https://homologacao.focusnfe.com.br/v2"
+        assert p._base_url_for("producao") == "https://api.focusnfe.com.br/v2"
 
     def test_timeout_invalido_cai_para_30(self, monkeypatch):
         monkeypatch.setenv("FOCUSNFE_TIMEOUT", "nao-e-numero")

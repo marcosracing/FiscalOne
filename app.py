@@ -614,6 +614,19 @@ def _status_para_codigo(codigo):
         return 502
     if codigo == "PROVIDER_NAO_IMPLEMENTADO":
         return 501
+    # Fase 2 HTTP FocusNFe — mapeamento de codigos do provider Focus.
+    if codigo in ("FOCUS_TOKEN_AUSENTE", "FOCUS_BAD_REQUEST",
+                  "FOCUS_TIPO_NAO_SUPORTADO"):
+        return 400
+    if codigo == "FOCUS_AUTH_ERROR":
+        return 401
+    if codigo == "FOCUS_FORBIDDEN":
+        return 403
+    if codigo == "FOCUS_RATE_LIMIT":
+        return 429
+    if codigo in ("FOCUS_TIMEOUT", "FOCUS_UNAVAILABLE", "FOCUS_SERVER_ERROR",
+                  "FOCUS_HTTP_ERROR", "FOCUS_PARSE_ERROR", "FOCUS_SCHEMA_ERROR"):
+        return 502
     return 500
 
 # ── Rotas legadas (provider pattern — mantidas, stubs) ────────────────────────

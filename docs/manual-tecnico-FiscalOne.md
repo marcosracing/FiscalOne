@@ -503,3 +503,25 @@ Preparação de infraestrutura para receber Focus NFe como provider de recebimen
 **Deliberadamente fora de escopo:** HTTP real, `gov_fetch()` real, DANFE download, persistência, ativação em produção. `gov_fetch` e `consultar_dfe_nsu` seguem retornando `_STUB` (`PROVIDER_NAO_IMPLEMENTADO`). Testes: 91/91 verdes (43 novos).
 
 Detalhes em `docs/adr/_handoff/2026-07-17-fase2-prep-focusnfe.md`.
+
+---
+
+## Fase 2 HTTP · FocusNFeProvider real (2026-07-16)
+
+`FocusNFeProvider` sai do stub e passa a fazer HTTP real. Testes 100% mockados via `unittest.mock.patch("requests.get")` — zero chamada real disparada.
+
+**API do provider:**
+- `gov_fetch(payload, trace_id)` — `GET /v2/nfes_recebidas?cnpj=&versao=` com `Authorization: Basic base64(token:)`. Cursor `X-Max-Version` ou maior `versao` dos itens. Códigos HTTP explícitos (400/401/403/429/5xx/timeout/parse) mapeados para envelope canônico `FOCUS_*`.
+- `consultar_dfe_nsu(...)` — delegação para `gov_fetch()` (Focus não usa mTLS).
+- `baixar_danfe(chave)` — `GET /v2/nfes_recebidas/{chave}.pdf` com `allow_redirects=False`. Se 302, segundo GET **sem `Authorization`** (URL pré-assinada). Retorna `{bytes, sha256, mime, tamanho}`.
+
+**Códigos de erro Focus** (mapeamento em `app.py::_status_para_codigo`):
+- `FOCUS_TOKEN_AUSENTE`, `FOCUS_BAD_REQUEST`, `FOCUS_TIPO_NAO_SUPORTADO` → 400
+- `FOCUS_AUTH_ERROR` → 401 · `FOCUS_FORBIDDEN` → 403 · `FOCUS_RATE_LIMIT` → 429
+- `FOCUS_TIMEOUT`, `FOCUS_UNAVAILABLE`, `FOCUS_SERVER_ERROR`, `FOCUS_HTTP_ERROR`, `FOCUS_PARSE_ERROR`, `FOCUS_SCHEMA_ERROR` → 502
+
+**Segurança:** token nunca em log/envelope/`raw_json_focus`; segundo GET DANFE nunca envia `Authorization`. Emissão bloqueada por `EmissaoProibida` em `emitir_*`.
+
+**Item inválido no lote** (não-dict, sem chave, mapper lança) entra em `erros[]` com `FOCUS_ITEM_INVALIDO`; lote não é derrubado.
+
+Detalhes: `docs/adr/_handoff/2026-07-16-fase2-http-focusnfe.md`.
