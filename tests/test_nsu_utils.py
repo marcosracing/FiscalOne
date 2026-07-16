@@ -1,4 +1,4 @@
-"""NSU: SEFAZ zfill(15), ADN preservado, provider desconhecido → ValueError."""
+"""NSU: SEFAZ zfill(15), ADN preservado, FocusNFe preservado, desconhecido → ValueError."""
 import pytest
 from services.nsu_utils import normalizar_nsu
 
@@ -38,10 +38,36 @@ class TestNsuAdn:
         assert normalizar_nsu("adn_nfse", "nfse", "") == "0"
 
 
+class TestNsuFocusNFe:
+    """FocusNFe usa `versao` incremental (int). Preservar como string, sem zfill."""
+
+    def test_preserva_string(self):
+        assert normalizar_nsu("focusnfe", "nfe", "123456") == "123456"
+
+    def test_aceita_int(self):
+        # Focus expoe versao como int em JSON. normalizar_nsu aceita e stringifica.
+        assert normalizar_nsu("focusnfe", "nfe", 99) == "99"
+
+    def test_nunca_zfill(self):
+        assert normalizar_nsu("focusnfe", "nfe", "000123") == "000123"
+
+    def test_none_vira_zero(self):
+        assert normalizar_nsu("focusnfe", "nfe", None) == "0"
+
+    def test_vazio_vira_zero(self):
+        assert normalizar_nsu("focusnfe", "nfe", "") == "0"
+
+    def test_alias_import_origin(self):
+        assert normalizar_nsu("fiscalone_focusnfe", "nfe", "42") == "42"
+
+    def test_string_com_espacos_e_normalizada(self):
+        assert normalizar_nsu("focusnfe", "nfe", "  77  ") == "77"
+
+
 class TestNsuProviderDesconhecido:
     def test_provider_invalido_erro_controlado(self):
         with pytest.raises(ValueError, match="Provider desconhecido"):
-            normalizar_nsu("focusnfe", "nfe", "1")
+            normalizar_nsu("bogus_provider", "nfe", "1")
 
     def test_provider_vazio_erro(self):
         with pytest.raises(ValueError):

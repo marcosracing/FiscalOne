@@ -47,3 +47,10 @@ class NFeDocOpcional(TypedDict, total=False):
     xml_bruto:      str                # NUNCA logar
     xml_hash_sha256: str
     categoria:      str                # unificado no results[]
+    # ── FocusNFe (Fase 2-prep) — presentes apenas quando import_origin
+    # for "fiscalone_focusnfe". Campos opcionais nao quebram consumidores
+    # que ignoram chaves desconhecidas.
+    versao:          int               # cursor incremental Focus (nao NSU)
+    raw_json_focus:  str               # JSON serializado da resposta Focus
+    danfe_sha256:    str               # hash do DANFE PDF baixado
+    danfe_fonte:     str               # "focusnfe" | "sefaz" | "email" | ...

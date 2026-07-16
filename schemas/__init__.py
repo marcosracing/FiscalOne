@@ -32,6 +32,7 @@ ImportOrigin = Literal[
     "fiscalone_nfse_adn",    # NFS-e Nacional via ADN
     "fiscalone_email",       # captacao por email (MapOne)
     "fiscalone_reparse",     # reprocessamento manual (MapOne)
+    "fiscalone_focusnfe",    # FocusNFe (recebimento NF-e/CT-e via API REST)
 ]
 
 # ── status_lote — resultado agregado do lote ────────────────────────────────

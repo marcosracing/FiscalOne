@@ -52,3 +52,11 @@ Limites preservados:
 - sem certificado em repouso;
 - sem emissão fiscal ativa;
 - logs sem PFX, senha, base64 ou XML completo.
+
+## Fase 2-prep — 2026-07-17 (FocusNFeProvider infra sem HTTP)
+
+- `normalizar_nsu` agora suporta `focusnfe`/`fiscalone_focusnfe` — preserva `versao` como string, aceita int, `None`/vazio → `"0"`.
+- `FocusNFeProvider` recebe `EmissaoProibida` (emitir_cte/emitir_mdfe), `_masked_token`, `__init__` com envs (`FOCUSNFE_TOKEN`, `FOCUSNFE_BASE_URL`, `FOCUSNFE_TIMEOUT`), `_require_token` para Fase 2.
+- Schemas expandidos: `ImportOrigin += "fiscalone_focusnfe"`; `NFeDocOpcional` inclui `versao`, `raw_json_focus`, `danfe_sha256`, `danfe_fonte`.
+- `gov_fetch`/`consultar_dfe_nsu` seguem stub — Fase 2 HTTP separada.
+- Nenhuma alteração em MapOne/CtrlOne/LegalOne. Sem HTTP real. Sem push. Sem deploy.

@@ -486,3 +486,20 @@ Regras preservadas:
 Para ambiente definitivo, o mesmo princípio deve ser mantido em WSGI/gunicorn:
 mais de um worker/thread pode processar DFe recebido, mas sem criar estado fiscal
 local no FiscalOne.
+
+---
+
+## Fase 2-prep · FocusNFeProvider (2026-07-17)
+
+Preparação de infraestrutura para receber Focus NFe como provider de recebimento de documentos, sem ativar integração HTTP real nesta fase.
+
+**Escopo:**
+- `services/nsu_utils.py` — `normalizar_nsu("focusnfe" | "fiscalone_focusnfe", doc_type, versao)` preserva `versao` (int/string) sem zfill; `None`/vazio → `"0"`.
+- `providers/focusnfe_provider.py` — `EmissaoProibida(RuntimeError)` bloqueia `emitir_cte`/`emitir_mdfe`; `_masked_token()` mascara para logs (nunca valor completo); `__init__` lê `FOCUSNFE_TOKEN`, `FOCUSNFE_BASE_URL` (sem `/` final), `FOCUSNFE_TIMEOUT` (fallback 30). `_require_token()` é fail-fast local para Fase 2.
+- `schemas/__init__.py` — `ImportOrigin` inclui `"fiscalone_focusnfe"`.
+- `schemas/nfe_schema.py` — `NFeDocOpcional` inclui `versao`, `raw_json_focus`, `danfe_sha256`, `danfe_fonte`.
+- `.env.example` — `FOCUSNFE_TOKEN`, `FOCUSNFE_BASE_URL`, `FOCUSNFE_AMBIENTE`, `FOCUSNFE_TIMEOUT`.
+
+**Deliberadamente fora de escopo:** HTTP real, `gov_fetch()` real, DANFE download, persistência, ativação em produção. `gov_fetch` e `consultar_dfe_nsu` seguem retornando `_STUB` (`PROVIDER_NAO_IMPLEMENTADO`). Testes: 91/91 verdes (43 novos).
+
+Detalhes em `docs/adr/_handoff/2026-07-17-fase2-prep-focusnfe.md`.
