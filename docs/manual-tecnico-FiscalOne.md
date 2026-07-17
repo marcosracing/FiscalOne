@@ -525,3 +525,35 @@ Detalhes em `docs/adr/_handoff/2026-07-17-fase2-prep-focusnfe.md`.
 **Item inválido no lote** (não-dict, sem chave, mapper lança) entra em `erros[]` com `FOCUS_ITEM_INVALIDO`; lote não é derrubado.
 
 Detalhes: `docs/adr/_handoff/2026-07-16-fase2-http-focusnfe.md`.
+
+---
+
+## Fase D · provider e token FocusNFe por requisição (2026-07-17)
+
+Base: ADR-0043 (`RLogix_shared/adr/ADR-0043-*`).
+
+`/fiscal/gov/fetch` agora resolve provider por requisição. Contrato novo:
+
+```json
+{
+  "provider": "sefaz|focusnfe",     // opcional; ausente = fallback env FISCAL_PROVIDER
+  "focusnfe_token": "...",          // opcional; usado só se provider=focusnfe
+  "ambiente": "homologacao|producao",
+  "tipo": "nfe|cte|nfse",
+  "cnpj_tenant": "...",
+  "ultimo_nsu": "..."
+  // + cert_pfx_base64/cert_password quando provider=sefaz
+}
+```
+
+**Regras:**
+- `provider` inválido → HTTP 400 `PROVIDER_INVALIDO`, sem fallback silencioso.
+- `provider="focusnfe"` + `focusnfe_token` no payload: token injetado tem precedência sobre env `FOCUSNFE_TOKEN`. `focusnfe_token` é extraído via `payload.pop()` e nunca aparece em envelope/log/response.
+- `provider="focusnfe"` + `cert_pfx_base64/cert_password` no payload: **removidos defensivamente** antes do provider ser instanciado (blindagem contra bug/legado do MapOne).
+- SEFAZ 100% preservado — sem alteração em `SefazProvider` nem em `cert_provider`.
+
+**Precedência do token FocusNFe** (dentro de `FocusNFeProvider.__init__(token=None)`): injetado > env `FOCUSNFE_TOKEN` > vazio (erro `FOCUS_TOKEN_AUSENTE`).
+
+**Segurança:** testes validam que token, header `Authorization`, prefixo `Basic`, e campos de cert nunca aparecem em envelope, body HTTP ou stdout (`_log_stdout` tem schema JSON fixo). 183/183 testes passam. Zero HTTP real.
+
+Handoff: `docs/adr/_handoff/2026-07-17-fase-d-fiscalone-provider-token-por-request.md`.

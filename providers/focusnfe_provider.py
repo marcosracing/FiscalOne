@@ -229,8 +229,15 @@ def _mapear_nfe_focus(item: dict, trace_id: str) -> dict:
 
 # ── Provider ──────────────────────────────────────────────────────────────────
 class FocusNFeProvider(GovProvider):
-    def __init__(self):
-        self._token = os.environ.get("FOCUSNFE_TOKEN", "")
+    def __init__(self, token: str | None = None):
+        """Fase D — provider aceita token injetado por requisicao.
+
+        Precedencia: token injetado no construtor > env FOCUSNFE_TOKEN > vazio.
+        Sem mutacao de `self._token` em metodos (uma instancia por request via
+        `get_provider(...)` em app.py).
+        """
+        injetado = (token or "").strip() if token is not None else ""
+        self._token = injetado or os.environ.get("FOCUSNFE_TOKEN", "")
         self._base_url_env = os.environ.get("FOCUSNFE_BASE_URL", "").strip()
         # base_url resolvido lazy no metodo para respeitar ambiente do payload
         try:

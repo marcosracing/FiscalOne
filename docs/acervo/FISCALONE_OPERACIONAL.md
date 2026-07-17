@@ -70,3 +70,12 @@ Limites preservados:
 - Item inválido no lote não derruba os demais.
 - Segurança: token nunca em log/envelope/raw_json_focus; segundo GET DANFE sem Authorization (validado por teste).
 - 142/142 testes passam. 51 novos em `test_focusnfe_http.py`. Zero HTTP real. Sem push. Sem deploy.
+
+## Fase D — 2026-07-17 (provider e token FocusNFe por requisição)
+
+- `/fiscal/gov/fetch` agora aceita `provider` e `focusnfe_token` no payload. Provider inválido → 400 `PROVIDER_INVALIDO`.
+- `get_provider(provider_name=None, token=None)` — allowlist `{sefaz, focusnfe}`; fallback ao env `FISCAL_PROVIDER` quando parâmetro ausente.
+- `FocusNFeProvider(token=None)` — precedência: injetado > `FOCUSNFE_TOKEN` env > vazio.
+- Blindagem: `provider="focusnfe"` remove `cert_pfx_base64`/`cert_password`/`cert_cnpj`/`cert_valid_until` do payload antes de instanciar (defesa em profundidade contra bug/legado MapOne).
+- SEFAZ 100% compatível — sem regressão. 183/183 testes passam. Zero HTTP real.
+- Detalhes: `docs/adr/_handoff/2026-07-17-fase-d-fiscalone-provider-token-por-request.md`.

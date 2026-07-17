@@ -212,10 +212,38 @@ def _provider_response(operacao, payload, status_padrao=501):
     status = 200 if payload.get("ok") else status_padrao
     return jsonify(payload), status
 
-def get_provider():
-    if FISCAL_PROVIDER == "focusnfe":
+# Allowlist de providers aceitos por requisicao. Blindagem contra instanciacao
+# de classes arbitrarias vindas do payload.
+_PROVIDERS_SUPORTADOS = frozenset({"sefaz", "focusnfe"})
+
+
+def get_provider(provider_name: str | None = None, token: str | None = None):
+    """Resolve provider por requisicao (Fase D) com fallback ao env FISCAL_PROVIDER.
+
+    Args:
+        provider_name: `"sefaz"` | `"focusnfe"` | None. Se None/vazio, cai no
+            fallback historico via env `FISCAL_PROVIDER`.
+        token: opcional; SO usado para `focusnfe`. Precedencia: injetado > env.
+
+    Raises:
+        ValueError: se `provider_name` fornecido nao estiver em `_PROVIDERS_SUPORTADOS`.
+            O handler HTTP deve validar antes de chamar (para retornar 400 controlado).
+
+    Nota: `token` para SEFAZ e ignorado — SefazProvider usa certificado A1
+    resolvido de outra forma (cert_provider.resolve_cert do payload/env).
+    """
+    resolved = (provider_name or "").strip().lower() or FISCAL_PROVIDER
+    if resolved == "focusnfe":
         from providers.focusnfe_provider import FocusNFeProvider
-        return FocusNFeProvider()
+        return FocusNFeProvider(token=token)
+    if resolved == "sefaz":
+        from providers.sefaz_provider import SefazProvider
+        return SefazProvider()
+    # Provider desconhecido: se veio do env, mantem comportamento legado (retorna
+    # SEFAZ como fallback silencioso — igual antes). Se veio do parametro,
+    # levanta para o handler HTTP tratar como PROVIDER_INVALIDO.
+    if provider_name:
+        raise ValueError(f"provider nao suportado: {provider_name!r}")
     from providers.sefaz_provider import SefazProvider
     return SefazProvider()
 
@@ -500,8 +528,42 @@ def gov_fetch():
             "erro":     "tipo obrigatorio: 'nfe', 'cte' ou 'nfse'",
         }), 400
 
+    # ── Fase D — provider por requisicao ─────────────────────────────────────
+    # `provider` vem do payload (MapOne ja envia hoje). Se ausente, fallback
+    # ao env FISCAL_PROVIDER (comportamento legado). Se presente mas invalido,
+    # 400 imediato sem fallback silencioso.
+    provider_payload = (payload.get("provider") or "").strip().lower()
+    if provider_payload and provider_payload not in _PROVIDERS_SUPORTADOS:
+        _log_stdout("gov_fetch", "erro", trace_id, source_system=source_system,
+                    erro_msg=f"PROVIDER_INVALIDO: {provider_payload!r}")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "PROVIDER_INVALIDO",
+            "erro":     "provider nao suportado",
+        }), 400
+
+    # Extracao defensiva do token FocusNFe: POP remove a chave do payload
+    # antes de qualquer serializacao/log posterior. So captura se o provider
+    # da requisicao for focusnfe; para SEFAZ, remove sem usar.
+    if provider_payload == "focusnfe":
+        focusnfe_token = payload.pop("focusnfe_token", None)
+        # Blindagem: se provider=focusnfe, ignorar defensivamente qualquer campo
+        # de certificado A1 que MapOne possa ter enviado por engano. O contrato
+        # correto e MapOne nao enviar cert quando provider=focusnfe, mas o
+        # FiscalOne precisa estar protegido antes do ajuste no MapOne.
+        payload.pop("cert_pfx_base64", None)
+        payload.pop("cert_password", None)
+        payload.pop("cert_cnpj", None)
+        payload.pop("cert_valid_until", None)
+    else:
+        # Provider=sefaz ou fallback env: remove focusnfe_token se vier por engano;
+        # SefazProvider nunca precisa desse campo.
+        payload.pop("focusnfe_token", None)
+        focusnfe_token = None
+
     try:
-        provider = get_provider()
+        provider = get_provider(provider_payload or None, token=focusnfe_token)
         result = provider.gov_fetch(payload, trace_id)
     except NotImplementedError as e:
         _log_stdout("gov_fetch", "erro", trace_id, source_system=source_system,
@@ -614,6 +676,11 @@ def _status_para_codigo(codigo):
         return 502
     if codigo == "PROVIDER_NAO_IMPLEMENTADO":
         return 501
+    # Fase D — validacao de payload no handler retorna 400 com este codigo,
+    # mas o mapeamento explicito abaixo cobre casos em que o codigo aparece
+    # em result do provider (defesa em profundidade).
+    if codigo == "PROVIDER_INVALIDO":
+        return 400
     # Fase 2 HTTP FocusNFe — mapeamento de codigos do provider Focus.
     if codigo in ("FOCUS_TOKEN_AUSENTE", "FOCUS_BAD_REQUEST",
                   "FOCUS_TIPO_NAO_SUPORTADO"):
