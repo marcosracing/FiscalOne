@@ -281,6 +281,129 @@ def _mapear_nfe_focus(item: dict, trace_id: str) -> dict:
     return doc
 
 
+# ── Mapper NFSe Nacional (Fase E4c) ───────────────────────────────────────────
+def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
+    """Mapeia item Focus (schema `NfseRecebida`) para dict compativel com
+    MapOne. Contrato distinto do NF-e: NFSe nao tem chave DFe 44 digitos,
+    nao usa cStat SEFAZ, e o XML vem via URL separada (`url_xml`).
+
+    Campos criticos do item Focus:
+      - chave (string opaca — nao validar DV)
+      - status (int): 1 autorizado | 2 cancelado | 3 substituido
+      - prestador/tomador: dicts com cpf/cnpj + razao_social
+      - servicos: dict com valor_servicos, valor_iss, iss_retido,
+                  valor_liquido, discriminacao
+      - versao (int — cursor incremental)
+      - url_xml (opcional — se presente, `gov_fetch` baixa)
+
+    NUNCA inclui Authorization/token. Preserva `raw_json_focus` sanitizado.
+    """
+    if not isinstance(item, dict):
+        raise ValueError(f"item nao e dict: {type(item).__name__}")
+
+    chave = _get_str(item, "chave")
+    if not chave:
+        raise ValueError("chave NFSe ausente no item Focus")
+
+    status_raw = item.get("status")
+    try:
+        status_int = int(status_raw) if status_raw is not None else 1
+    except (TypeError, ValueError):
+        status_int = 1
+
+    if status_int == 2:
+        situacao_nfse, cancelado_r, substituido_r = "cancelada", 1, 0
+    elif status_int == 3:
+        situacao_nfse, cancelado_r, substituido_r = "substituida", 0, 1
+    else:
+        situacao_nfse, cancelado_r, substituido_r = "autorizada", 0, 0
+
+    prestador = item.get("prestador") if isinstance(item.get("prestador"), dict) else {}
+    tomador   = item.get("tomador")   if isinstance(item.get("tomador"),   dict) else {}
+    servicos  = item.get("servicos")  if isinstance(item.get("servicos"),  dict) else {}
+
+    def _doc_e_tipo(entidade: dict) -> tuple[str, str]:
+        """Extrai (documento_digitos, tipo). Aceita `cnpj` ou `cpf`."""
+        cnpj = str(entidade.get("cnpj") or "").strip()
+        if cnpj:
+            return _get_str({"v": cnpj}, "v"), "cnpj"
+        cpf = str(entidade.get("cpf") or "").strip()
+        if cpf:
+            return _get_str({"v": cpf}, "v"), "cpf"
+        # Documento pode vir consolidado em `cpf_cnpj`
+        cc = str(entidade.get("cpf_cnpj") or "").strip()
+        if cc:
+            tipo_h = "cpf" if len(cc) <= 11 else "cnpj"
+            return cc, tipo_h
+        return "", ""
+
+    prest_doc, prest_tipo = _doc_e_tipo(prestador)
+    tom_doc,   tom_tipo   = _doc_e_tipo(tomador)
+
+    # Normaliza documentos para so digitos (mesmo padrao do _mapear_nfe_focus)
+    import re as _re
+    prest_doc = _re.sub(r"\D", "", prest_doc)
+    tom_doc   = _re.sub(r"\D", "", tom_doc)
+
+    versao_raw = item.get("versao") or 0
+    try:
+        versao = int(versao_raw)
+    except (TypeError, ValueError):
+        versao = 0
+
+    v_servicos = _get_str(servicos, "valor_servicos")
+    v_iss      = _get_str(servicos, "valor_iss")
+    v_liquido  = _get_str(servicos, "valor_liquido")
+    iss_retido = _get_str(servicos, "iss_retido")
+    discriminacao = _get_str(servicos, "discriminacao")
+
+    dh_emi = _get_str(item, "data_emissao")
+
+    doc = {
+        "ok":              True,
+        "type":            "nfse",
+        "doc_type":        "nfse",
+        "trace_id":        trace_id,
+        "chave":           chave,
+        "chNFe":           chave,           # compat com consumers que leem chNFe
+        "numero":          _get_str(item, "numero"),
+        "serie":           _get_str(item, "serie"),
+        "codigo_verificacao": _get_str(item, "codigo_verificacao"),
+        "versao":          versao,
+        "competencia":     _get_str(item, "competencia"),
+        # Prestador → emit_* (fornecedor da NFSe recebida).
+        "emit_cnpj":       prest_doc,
+        "emit_doc_tipo":   prest_tipo,
+        "emit_nome":       _get_str(prestador, "razao_social", "nome_fantasia"),
+        "emit_ie":         _get_str(prestador, "inscricao_municipal"),
+        # Tomador → dest_* (tenant nesta fase — NFSe recebida).
+        "dest_cnpj":       tom_doc,
+        "dest_doc_tipo":   tom_tipo,
+        "dest_nome":       _get_str(tomador, "razao_social"),
+        # Datas / valores.
+        "dh_emi":          dh_emi,
+        "dh_emi_utc":      dh_emi[:19] if dh_emi else "",
+        "valor_total":     v_servicos,
+        "valor_iss":       v_iss,
+        "valor_liquido":   v_liquido,
+        "iss_retido":      iss_retido,
+        "discriminacao":   discriminacao,
+        "xinf":            discriminacao[:500] if discriminacao else "",
+        # Status/situacao NFSe — nao usar cStat SEFAZ.
+        "status_xml":      "RESUMO",         # promovido a COMPLETO pelo gov_fetch
+        "situacao_nfse":   situacao_nfse,
+        "cancelado":       cancelado_r,
+        "substituido":     substituido_r,
+        "url_xml":         _get_str(item, "url_xml"),
+        # Rastreabilidade / persistencia.
+        "import_origin":   "fiscalone_focusnfe_nfse",
+        "status_sefaz":    "focusnfe",
+        "parser_version":  "focus_nfse_v1",
+        "raw_json_focus":  _dump_focus_json(item),
+    }
+    return doc
+
+
 # ── Provider ──────────────────────────────────────────────────────────────────
 class FocusNFeProvider(GovProvider):
     def __init__(self, token: str | None = None):
@@ -337,10 +460,13 @@ class FocusNFeProvider(GovProvider):
         versao_entrada = str(ultimo_nsu_entrada).strip() or "0"
 
         # ── Validacoes ────────────────────────────────────────────────────
-        if tipo != "nfe":
+        if tipo not in ("nfe", "nfse"):
+            # Fase E4c — FocusNFe suporta nfe (NF-e recebida) e nfse
+            # (NFSe Nacional recebida). CT-e e MDF-e continuam nao
+            # suportados pelo FocusNFe (delegar a SEFAZ/outros providers).
             return _envelope_erro(
                 trace_id, "FOCUS_TIPO_NAO_SUPORTADO",
-                "FocusNFe nesta fase suporta apenas tipo='nfe'.",
+                "FocusNFe suporta apenas tipo='nfe' ou 'nfse'.",
                 {"ultimo_nsu": versao_entrada, "max_nsu": versao_entrada},
             )
         if not cnpj:
@@ -358,12 +484,22 @@ class FocusNFeProvider(GovProvider):
             )
 
         base_url = self._base_url_for(ambiente)
-        url = f"{base_url}/v2/nfes_recebidas"
+        # Fase E4c — rota canonica por tipo. NFSe usa endpoint separado
+        # `/v2/nfses_recebidas` (doc oficial). Cursor `versao` incremental
+        # eh comum aos dois — nao ha divergencia de contrato.
+        if tipo == "nfse":
+            url = f"{base_url}/v2/nfses_recebidas"
+        else:
+            url = f"{base_url}/v2/nfes_recebidas"
         headers = {
             **_basic_auth_header(token),
             "Accept": "application/json",
         }
         params = {"cnpj": cnpj, "versao": versao_entrada}
+        # Fase E4c — NFSe Nacional recebida via Focus vem completa quando
+        # `completa=1` (doc oficial). Sem esse flag, so viria resumo.
+        if tipo == "nfse":
+            params["completa"] = "1"
 
         # ── HTTP ──────────────────────────────────────────────────────────
         try:
@@ -405,6 +541,27 @@ class FocusNFeProvider(GovProvider):
                  "ultimo_nsu": versao_entrada, "max_nsu": versao_entrada},
             )
         if status_code == 403:
+            # Fase E4c — Focus devolve `{"codigo":"empresa_nao_habilitada",
+            # "mensagem":"..."}` em 403 quando o CNPJ nao esta habilitado
+            # para NFSe Nacional (habilitacao operacional via suporte
+            # Focus). Traduzido para codigo canonico dedicado para o
+            # operador identificar a acao (contato Focus, nao retry).
+            focus_codigo = ""
+            try:
+                _body_403 = resp.json()
+                if isinstance(_body_403, dict):
+                    focus_codigo = str(_body_403.get("codigo") or "").strip().lower()
+            except (ValueError, TypeError):
+                focus_codigo = ""
+            if focus_codigo == "empresa_nao_habilitada":
+                return _envelope_erro(
+                    trace_id, "FOCUS_NFSE_NAO_HABILITADA",
+                    "Empresa nao habilitada no FocusNFe para NFSe Nacional. "
+                    "Contate o suporte Focus para habilitar o CNPJ antes de "
+                    "acionar buscas.",
+                    {"http_status": 403,
+                     "ultimo_nsu": versao_entrada, "max_nsu": versao_entrada},
+                )
             return _envelope_erro(
                 trace_id, "FOCUS_FORBIDDEN",
                 "FocusNFe negou acesso ao recurso (403).",
@@ -466,12 +623,16 @@ class FocusNFeProvider(GovProvider):
             total_count = len(body)
 
         # ── Mapper ────────────────────────────────────────────────────────
+        # Dispatch por tipo: NF-e usa `_mapear_nfe_focus`, NFSe usa
+        # `_mapear_nfse_focus` (contrato distinto — sem cStat SEFAZ, sem
+        # DV DFe 44, prestador/tomador em vez de emit/dest classicos).
+        mapper = _mapear_nfse_focus if tipo == "nfse" else _mapear_nfe_focus
         documentos: list[dict] = []
         erros: list[dict] = []
         max_versao_itens = 0
         for idx, item in enumerate(body):
             try:
-                doc = _mapear_nfe_focus(item, trace_id)
+                doc = mapper(item, trace_id)
             except Exception as exc:
                 erros.append({
                     "ok":       False,
@@ -486,23 +647,45 @@ class FocusNFeProvider(GovProvider):
             if v > max_versao_itens:
                 max_versao_itens = v
 
-        # ── XML completo por chave (Fase E4a) ────────────────────────────
-        # Para itens com nfe_completa=True, baixa nfeProc via endpoint
-        # separado /nfes_recebidas/{chave}.xml. Cap duro `_XML_BATCH_CAP`
-        # para nao estourar tempo; excedentes viram RESUMO + xml_pending.
-        # Nota CANCELADA nao baixa XML nesta fase — evento/XML de
-        # cancelamento fica para E4b (documentado no handoff).
-        # Falha individual (404/timeout) nunca derruba batch — item vira
-        # RESUMO + xml_pending, log warn estruturado sem token.
+        # ── XML completo por chave / url_xml (Fase E4a + E4c) ────────────
+        # NF-e (E4a): busca XML por chave via GET /nfes_recebidas/{chave}.xml
+        #             quando `nfe_completa=True`.
+        # NFSe (E4c): busca XML via URL fornecida em `url_xml` (a rota
+        #             `/nfses_recebidas/{chave}.xml` NAO faz parte do
+        #             contrato oficial). Falha individual nunca derruba
+        #             batch — vira RESUMO + xml_pending.
+        # Nota CANCELADA (NF-e) nao baixa XML nesta fase — E4b.
+        # NFSe status 2/3 (cancelada/substituida) tambem nao baixa —
+        # substituicao/cancelamento demandam evento separado (fora do E4c).
         xml_baixados = 0
         xml_pendentes = 0
         for doc in documentos:
             if doc.get("cancelado") == 1:
-                # Preserva situacao/data_cancelamento/justificativa. XML
-                # de cancelamento fica para E4b.
                 continue
+            if doc.get("substituido") == 1:
+                continue
+            if tipo == "nfse":
+                # NFSe: url_xml opcional; sem url → RESUMO permanente.
+                url_xml = doc.get("url_xml")
+                if not url_xml:
+                    continue
+                if xml_baixados >= _XML_BATCH_CAP:
+                    doc["xml_pending"] = True
+                    xml_pendentes += 1
+                    continue
+                res = self.baixar_xml_nfse(url_xml)
+                if res.get("ok"):
+                    doc["xml_bruto"]       = res["xml_bruto"]
+                    doc["xml_hash_sha256"] = res["xml_hash_sha256"]
+                    doc["status_xml"]      = "COMPLETO"
+                    xml_baixados += 1
+                else:
+                    doc["xml_pending"] = True
+                    xml_pendentes += 1
+                continue
+            # NF-e (fluxo E4a existente)
             if not doc.get("nfe_completa"):
-                continue  # RESUMO (correto — Focus ainda nao tem XML).
+                continue
             if xml_baixados >= _XML_BATCH_CAP:
                 doc["xml_pending"] = True
                 xml_pendentes += 1
@@ -517,11 +700,6 @@ class FocusNFeProvider(GovProvider):
             else:
                 doc["xml_pending"] = True
                 xml_pendentes += 1
-                # Log estruturado sem token/chave nao vaza credenciais.
-                # (Usa print em modulo puro — evita dependencia de logging
-                # nao configurado nos consumidores. Consumidor decide.)
-                # NOTA: nao usar logger aqui — modulo puro nao configura
-                # handlers; consumidor (app.py) faz a captura via stderr.
 
         # ── Cursor ────────────────────────────────────────────────────────
         max_version_hdr = resp.headers.get("X-Max-Version")
@@ -739,6 +917,127 @@ class FocusNFeProvider(GovProvider):
                 "provider": "focusnfe",
                 "codigo":   "FOCUS_XML_VAZIO",
                 "erro":     "Focus devolveu corpo vazio para XML.",
+            }
+        sha256 = hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()
+        return {
+            "ok":              True,
+            "provider":        "focusnfe",
+            "xml_bruto":       body,
+            "xml_hash_sha256": sha256,
+            "tamanho":         len(body),
+        }
+
+    # ── baixar_xml_nfse — nfse XML via url_xml (Fase E4c) ────────────────
+    def baixar_xml_nfse(self, url_xml: str) -> dict:
+        """Baixa XML NFSe Nacional a partir da `url_xml` fornecida pelo item
+        da listagem `/v2/nfses_recebidas`.
+
+        Diferencas vs `baixar_xml_completo` (NF-e por chave):
+        - URL nao eh construida — vem do proprio item Focus.
+        - Comportamento de redirect: se URL retornada for pre-assinada
+          (ex.: storage externo), o segundo GET pode nao aceitar
+          Authorization. Padrao E4c: **envia Authorization no primeiro
+          GET**; se receber 3xx sem Location, retorna erro estruturado.
+        - Timeout curto (min(self._timeout, 5)) — evita travar batch.
+
+        Retorno OK:  {ok, provider, xml_bruto, xml_hash_sha256, tamanho}
+        Retorno erro:{ok:False, provider, codigo, erro} — token nao vaza.
+        """
+        url = str(url_xml or "").strip()
+        if not url:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_BAD_REQUEST",
+                "erro":     "url_xml obrigatoria.",
+            }
+        try:
+            token = self._require_token()
+        except RuntimeError as exc:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_TOKEN_AUSENTE",
+                "erro":     str(exc),
+            }
+        headers_auth = {**_basic_auth_header(token), "Accept": "application/xml"}
+        timeout_xml = min(self._timeout, 5) if self._timeout else 5
+        try:
+            resp = requests.get(url, headers=headers_auth,
+                                allow_redirects=False, timeout=timeout_xml)
+        except requests.exceptions.Timeout:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_XML_TIMEOUT",
+                "erro":     f"Timeout ({timeout_xml}s) baixando XML NFSe.",
+            }
+        except requests.exceptions.RequestException as exc:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_XML_ERRO",
+                "erro":     f"Erro HTTP: {type(exc).__name__}.",
+            }
+        finally:
+            del token
+            del headers_auth
+
+        # Redirect: URL pre-assinada. Segundo GET SEM Authorization
+        # (URL ja carrega assinatura no query string).
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = resp.headers.get("Location", "").strip()
+            if not location:
+                return {
+                    "ok":       False,
+                    "provider": "focusnfe",
+                    "codigo":   "FOCUS_XML_NO_LOCATION",
+                    "erro":     f"Redirect {resp.status_code} sem Location.",
+                }
+            try:
+                resp2 = requests.get(location, headers={"Accept": "application/xml"},
+                                     allow_redirects=False, timeout=timeout_xml)
+            except requests.exceptions.RequestException as exc:
+                return {
+                    "ok":       False,
+                    "provider": "focusnfe",
+                    "codigo":   "FOCUS_XML_ERRO",
+                    "erro":     f"Erro download pre-assinado: {type(exc).__name__}.",
+                }
+            if resp2.status_code != 200:
+                return {
+                    "ok":          False,
+                    "provider":    "focusnfe",
+                    "codigo":      "FOCUS_XML_HTTP_ERROR",
+                    "erro":        f"Storage devolveu {resp2.status_code}.",
+                    "http_status": resp2.status_code,
+                }
+            body = resp2.text or ""
+        elif resp.status_code == 404:
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "FOCUS_XML_NAO_ENCONTRADO",
+                "erro":        "XML NFSe nao encontrado (404).",
+                "http_status": 404,
+            }
+        elif resp.status_code != 200:
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "FOCUS_XML_HTTP_ERROR",
+                "erro":        f"Status HTTP inesperado ({resp.status_code}).",
+                "http_status": resp.status_code,
+            }
+        else:
+            body = resp.text or ""
+
+        if not body:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_XML_VAZIO",
+                "erro":     "Corpo XML vazio.",
             }
         sha256 = hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()
         return {

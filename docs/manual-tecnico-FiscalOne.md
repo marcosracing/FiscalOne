@@ -597,3 +597,23 @@ Alinha `_mapear_nfe_focus` e `gov_fetch` (`providers/focusnfe_provider.py`) com 
 **Testes:** `tests/test_focusnfe_http.py` — 17 novos casos (`TestMapper` +5, `TestBaixarXmlCompleto` 7, `TestGovFetchComXml` 6). Suite completa **205/205**. Zero HTTP real. Zero token vazado.
 
 Handoff: `docs/adr/_handoff/2026-07-17-fase-e4a-mapper-schema-real-focus.md`.
+
+---
+
+## Fase E4c · NFSe Nacional Recebidas via FocusNFe (2026-07-17)
+
+Estende `FocusNFeProvider` para NFSe Nacional recebida (tenant = tomador). ADN NFSe **não é tocada**. NFSe emitida/receita fica fora.
+
+**Rota + parâmetros** (`providers/focusnfe_provider.py:340-378`): `tipo="nfse"` habilitado; URL `/v2/nfses_recebidas`; `params["completa"]="1"` só para NFSe. Cursor `versao` reusado.
+
+**Mapper** (`_mapear_nfse_focus`, `providers/focusnfe_provider.py:284-402`): contrato dedicado ao schema `NfseRecebida`. **Sem cStat SEFAZ**, **sem validação DV DFe 44**. Emite `situacao_nfse ∈ {autorizada, cancelada, substituida}` a partir de `status ∈ {1,2,3}`. Prestador → `emit_*` (fornecedor); tomador → `dest_*` (tenant). `servicos.valor_servicos` → `valor_total`. `import_origin = "fiscalone_focusnfe_nfse"` (dedicado — distingue de NF-e). `status_sefaz = "focusnfe"`.
+
+**XML via `url_xml`** (`baixar_xml_nfse`, `providers/focusnfe_provider.py:901-1024`): URL vem do próprio item (não é rota construída). `Authorization: Basic + Accept: application/xml`, timeout `min(self._timeout, 5)`. Se 3xx → segundo GET **sem Authorization** (URL pré-assinada — padrão análogo ao DANFE). Códigos: `FOCUS_XML_NAO_ENCONTRADO`, `FOCUS_XML_HTTP_ERROR`, `FOCUS_XML_NO_LOCATION`, `FOCUS_XML_TIMEOUT`, `FOCUS_XML_ERRO`, `FOCUS_XML_VAZIO`.
+
+**Integração `gov_fetch`** (`providers/focusnfe_provider.py:604-676`): loop pós-mapper dispatcheia por `tipo`. NFSe com `url_xml` presente e status=1 baixa XML; status ∈ {2,3} (cancelada/substituida) **não** baixa. Cap `_XML_BATCH_CAP=25` compartilhado com NF-e. Falha individual não derruba batch.
+
+**`empresa_nao_habilitada`** (`providers/focusnfe_provider.py:543-570`): detecta `{"codigo":"empresa_nao_habilitada"}` no 403 body e traduz para `FOCUS_NFSE_NAO_HABILITADA` (código canônico dedicado). Ação operacional: contato Focus, não retry.
+
+**Testes:** `tests/test_focusnfe_nfse_e4c.py` (27 casos: mapper 7, gov_fetch tipo NFSe 4, url_xml 5, baixar_xml_nfse 7, empresa não habilitada 3, segurança 1). Suite completa **232/232**. Zero HTTP real. Zero token vazado.
+
+Handoff: `docs/adr/_handoff/2026-07-17-fase-e4c-nfse-nacional-focusnfe.md`.
