@@ -54,3 +54,13 @@ class NFeDocOpcional(TypedDict, total=False):
     raw_json_focus:  str               # JSON serializado da resposta Focus
     danfe_sha256:    str               # hash do DANFE PDF baixado
     danfe_fonte:     str               # "focusnfe" | "sefaz" | "email" | ...
+    # ── FocusNFe · Fase E4a — schema real da doc oficial.
+    # Todos opcionais (total=False do TypedDict). SEFAZ/ADN nao populam.
+    nfe_completa:    bool              # Focus tem XML completo (nfeProc)?
+    tipo_nfe:        str               # "0"=Entrada | "1"=Saida
+    manifestacao:    str               # nulo|ciencia|confirmacao|desconhecimento|nao_realizada
+    situacao_focus:  str               # autorizada|cancelada|denegada (raw Focus)
+    cancelado:       int               # 1 se situacao=cancelada; senao 0
+    xml_pending:     bool              # XML nfeProc ainda nao baixado (cap batch ou falha)
+    data_cancelamento: str             # ISO 8601 — presente so em cancelada
+    justificativa_cancelamento: str    # texto Focus — presente so em cancelada

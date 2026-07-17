@@ -86,3 +86,15 @@ Limites preservados:
 - MapOne recebe `documentos[]` do FocusNFe também em `results[]` sem alteração no provider.
 - `results[]` explícito de outros providers preservado (SEFAZ, ADN).
 - 189/189 testes verdes (6 novos). Zero HTTP real. Sem push/deploy.
+
+## Fase E4a — 2026-07-17 (mapper schema real Focus + XML por chave + fix cStat)
+
+- Corrigido **BUG FISCAL GRAVE**: `cStat="100" if tem_xml else "101"` marcava resumo autorizado como cancelado (cStat=101). Agora: cStat=100 para `autorizada`, 101 SÓ para `cancelada`, 110 para `denegada`. Blindagem em teste explícito.
+- `CNPJ_emit` sai de `documento_emitente` (nome real da doc oficial) — antes ficava sempre vazio.
+- Novo método `FocusNFeProvider.baixar_xml_completo(chave, ambiente)`: `GET /v2/nfes_recebidas/{chave}.xml`, `Accept: application/xml`, timeout `min(self._timeout, 5)`, sem redirect. Códigos: `FOCUS_XML_NAO_ENCONTRADO`/`FOCUS_XML_HTTP_ERROR`/`FOCUS_XML_TIMEOUT`/`FOCUS_XML_ERRO`/`FOCUS_XML_VAZIO`.
+- `gov_fetch` loop pós-mapper: para `nfe_completa=True` (e não cancelada), chama `baixar_xml_completo(chNFe)`, anexa `xml_bruto` e promove `status_xml=COMPLETO`. Cap `_XML_BATCH_CAP=25` (override via env). Excedentes/falhas viram `xml_pending=True` — falha individual não derruba batch.
+- Envelope acrescido de `xmls_baixados`, `xmls_pendentes`.
+- `NFeDocOpcional`: novos campos opcionais `nfe_completa`, `tipo_nfe`, `manifestacao`, `situacao_focus`, `cancelado`, `xml_pending`, `data_cancelamento`, `justificativa_cancelamento`.
+- Nota `cancelada` NÃO baixa XML — E4b (evento de cancelamento).
+- 205/205 testes verdes (+17 novos). Zero HTTP real. Zero token vazado. Sem push/deploy.
+- Detalhes: `docs/adr/_handoff/2026-07-17-fase-e4a-mapper-schema-real-focus.md`.

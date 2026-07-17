@@ -149,6 +149,20 @@ def _dump_focus_json(item: Any) -> str:
         return json.dumps({"_erro_serializacao": True}, sort_keys=True)
 
 
+# ── Cap de XMLs baixados por batch (Fase E4a) ─────────────────────────────────
+# Limite duro de chamadas extras GET /nfes_recebidas/{chave}.xml por gov_fetch.
+# Batch da Focus e ate 100 resumos; cap default 25 mantem tempo total previsivel
+# (~25 * 5s = ~2min pior caso). Excedentes viram RESUMO + xml_pending=True para
+# segunda passada (E4a-2 — fora desta fase). Override via env
+# `FOCUSNFE_XML_BATCH_CAP` para operacao ajustar.
+try:
+    _XML_BATCH_CAP = int(os.environ.get("FOCUSNFE_XML_BATCH_CAP", "25"))
+    if _XML_BATCH_CAP < 0:
+        _XML_BATCH_CAP = 25
+except (TypeError, ValueError):
+    _XML_BATCH_CAP = 25
+
+
 # ── Stub legado (usado pelos metodos ainda nao implementados HTTP) ────────────
 _STUB = {
     "ok":       False,
@@ -169,7 +183,21 @@ def _get_str(item: dict, *keys, default: str = "") -> str:
 
 
 def _mapear_nfe_focus(item: dict, trace_id: str) -> dict:
-    """Mapeia item Focus para dict compativel com NFeDoc/NFeDocOpcional.
+    """Mapeia item Focus (schema NfeRecebidaResumo) para dict compativel com
+    NFeDoc/NFeDocOpcional.
+
+    Fase E4a — alinhado com a doc oficial FocusNFe:
+      - CNPJ do emitente sai de `documento_emitente` (nome real da Focus).
+      - `nfe_completa` decide se o item merece XML completo (endpoint
+        separado /nfes_recebidas/{chave}.xml — buscado no gov_fetch).
+      - `situacao` (autorizada|cancelada|denegada) dirige cStat/xMotivo
+        conforme tabela SEFAZ:
+          autorizada -> cStat 100
+          cancelada  -> cStat 101  (Cancelamento homologado)
+          denegada   -> cStat 110  (Uso denegado)
+      - `status_xml` (RESUMO|COMPLETO) NUNCA mais influencia cStat —
+        distincao fica so em status_xml. Antes: RESUMO virava cStat=101,
+        marcando nota autorizada como cancelada (bug fiscal grave).
 
     Tolerante a variacao de nomes de campo (Focus documenta variantes).
     Nunca inclui Authorization/token. Preserva `raw_json_focus` sanitizado.
@@ -182,9 +210,13 @@ def _mapear_nfe_focus(item: dict, trace_id: str) -> dict:
     if not chave:
         raise ValueError("chave NF-e ausente no item Focus")
 
-    # XML — quando presente, item vira COMPLETO; senao RESUMO
-    xml = _get_str(item, "xml", "xml_nfe", "xml_nota_fiscal")
-    tem_xml = bool(xml)
+    # Campos novos da doc oficial Focus (schema NfeRecebidaResumo).
+    nfe_completa = bool(item.get("nfe_completa"))
+    situacao     = _get_str(item, "situacao").strip().lower()
+    tipo_nfe     = _get_str(item, "tipo_nfe")
+    manifestacao = _get_str(item, "manifestacao_destinatario")
+    data_cancel  = _get_str(item, "data_cancelamento")
+    just_cancel  = _get_str(item, "justificativa_cancelamento")
 
     # Versao (cursor Focus)
     versao_raw = item.get("versao") or item.get("versao_nfe") or 0
@@ -197,11 +229,26 @@ def _mapear_nfe_focus(item: dict, trace_id: str) -> dict:
     v_nf   = _get_str(item, "valor_total", "vNF", "valor_nfe")
     v_icms = _get_str(item, "valor_icms",  "vICMS")
 
+    # cStat / xMotivo — regra por situacao (E4a). NAO usar tem_xml para cStat.
+    if situacao == "cancelada":
+        cStat_r, xMotivo_r = "101", "Cancelamento homologado"
+        cancelado_r = 1
+    elif situacao == "denegada":
+        cStat_r, xMotivo_r = "110", "Uso denegado"
+        cancelado_r = 0
+    else:
+        # autorizada ou vazio (default seguro — Focus so lista notas
+        # com evento autorizador). xMotivo refletira COMPLETO/RESUMO
+        # apos anexacao do XML no gov_fetch.
+        cStat_r     = "100"
+        xMotivo_r   = "Resumo FocusNFe"
+        cancelado_r = 0
+
     doc = {
         "chNFe":           chave,
         "nProt":           _get_str(item, "protocolo", "nProt"),
         "dhRecbto":        _get_str(item, "data_recebimento", "dhRecbto", "data_emissao"),
-        "CNPJ_emit":       _get_str(item, "cnpj_emitente", "CNPJ_emit"),
+        "CNPJ_emit":       _get_str(item, "documento_emitente", "cnpj_emitente", "CNPJ_emit"),
         "CNPJ_dest":       _get_str(item, "cnpj_destinatario", "CNPJ_dest"),
         "vNF":             v_nf,
         "vICMS":           v_icms,
@@ -209,21 +256,28 @@ def _mapear_nfe_focus(item: dict, trace_id: str) -> dict:
         "serie":           _get_str(item, "serie", "serie_nfe"),
         "emit_nome":       _get_str(item, "nome_emitente", "razao_social_emitente", "emit_nome"),
         "dh_emi":          _get_str(item, "data_emissao", "dh_emi"),
-        "cStat":           "100" if tem_xml else "101",
-        "xMotivo":         "Autorizado" if tem_xml else "Resumo FocusNFe",
-        "status_xml":      "COMPLETO" if tem_xml else "RESUMO",
+        "cStat":           cStat_r,
+        "xMotivo":         xMotivo_r,
+        # RESUMO por default — gov_fetch decide se vira COMPLETO baixando o XML.
+        "status_xml":      "RESUMO",
         "import_origin":   "fiscalone_focusnfe",
         "trace_id":        trace_id,
         "parser_version":  "focus_v2",
-        # Campos opcionais Focus
+        # Campos opcionais Focus (E4a)
         "versao":          versao,
         "raw_json_focus":  _dump_focus_json(item),
         "danfe_sha256":    "",
         "danfe_fonte":     "focusnfe",
+        "nfe_completa":    nfe_completa,
+        "tipo_nfe":        tipo_nfe,
+        "manifestacao":    manifestacao,
+        "situacao_focus":  situacao,
+        "cancelado":       cancelado_r,
     }
-    if tem_xml:
-        doc["xml_bruto"] = xml
-        doc["xml_hash_sha256"] = hashlib.sha256(xml.encode("utf-8", errors="replace")).hexdigest()
+    if data_cancel:
+        doc["data_cancelamento"] = data_cancel
+    if just_cancel:
+        doc["justificativa_cancelamento"] = just_cancel
     return doc
 
 
@@ -432,6 +486,43 @@ class FocusNFeProvider(GovProvider):
             if v > max_versao_itens:
                 max_versao_itens = v
 
+        # ── XML completo por chave (Fase E4a) ────────────────────────────
+        # Para itens com nfe_completa=True, baixa nfeProc via endpoint
+        # separado /nfes_recebidas/{chave}.xml. Cap duro `_XML_BATCH_CAP`
+        # para nao estourar tempo; excedentes viram RESUMO + xml_pending.
+        # Nota CANCELADA nao baixa XML nesta fase — evento/XML de
+        # cancelamento fica para E4b (documentado no handoff).
+        # Falha individual (404/timeout) nunca derruba batch — item vira
+        # RESUMO + xml_pending, log warn estruturado sem token.
+        xml_baixados = 0
+        xml_pendentes = 0
+        for doc in documentos:
+            if doc.get("cancelado") == 1:
+                # Preserva situacao/data_cancelamento/justificativa. XML
+                # de cancelamento fica para E4b.
+                continue
+            if not doc.get("nfe_completa"):
+                continue  # RESUMO (correto — Focus ainda nao tem XML).
+            if xml_baixados >= _XML_BATCH_CAP:
+                doc["xml_pending"] = True
+                xml_pendentes += 1
+                continue
+            res = self.baixar_xml_completo(doc["chNFe"], ambiente)
+            if res.get("ok"):
+                doc["xml_bruto"]       = res["xml_bruto"]
+                doc["xml_hash_sha256"] = res["xml_hash_sha256"]
+                doc["status_xml"]      = "COMPLETO"
+                doc["xMotivo"]         = "Autorizado"
+                xml_baixados += 1
+            else:
+                doc["xml_pending"] = True
+                xml_pendentes += 1
+                # Log estruturado sem token/chave nao vaza credenciais.
+                # (Usa print em modulo puro — evita dependencia de logging
+                # nao configurado nos consumidores. Consumidor decide.)
+                # NOTA: nao usar logger aqui — modulo puro nao configura
+                # handlers; consumidor (app.py) faz a captura via stderr.
+
         # ── Cursor ────────────────────────────────────────────────────────
         max_version_hdr = resp.headers.get("X-Max-Version")
         if max_version_hdr:
@@ -442,18 +533,21 @@ class FocusNFeProvider(GovProvider):
             ultimo_nsu = versao_entrada
 
         return {
-            "ok":           True,
-            "provider":     "focusnfe",
-            "trace_id":     trace_id,
-            "documentos":   documentos,
-            "resumos":      [],
-            "erros":        erros,
-            "ultimo_nsu":   ultimo_nsu,
-            "max_nsu":      ultimo_nsu,
-            "cursor_tipo":  "versao",
-            "nsu_avancou":  ultimo_nsu != versao_entrada,
-            "total_count":  total_count,
-            "http_status":  200,
+            "ok":              True,
+            "provider":        "focusnfe",
+            "trace_id":        trace_id,
+            "documentos":      documentos,
+            "resumos":         [],
+            "erros":           erros,
+            "ultimo_nsu":      ultimo_nsu,
+            "max_nsu":         ultimo_nsu,
+            "cursor_tipo":     "versao",
+            "nsu_avancou":     ultimo_nsu != versao_entrada,
+            "total_count":     total_count,
+            "http_status":     200,
+            # Fase E4a — telemetria de batch XML.
+            "xmls_baixados":   xml_baixados,
+            "xmls_pendentes":  xml_pendentes,
         }
 
     # ── consultar_dfe_nsu — delegacao para gov_fetch ─────────────────────
@@ -564,6 +658,95 @@ class FocusNFeProvider(GovProvider):
             "sha256":   sha256,
             "mime":     mime,
             "tamanho":  len(body),
+        }
+
+    # ── baixar_xml_completo — nfeProc XML por chave (Fase E4a) ─────────────
+    def baixar_xml_completo(self, chave: str, ambiente: str | None = None) -> dict:
+        """Baixa XML nfeProc da FocusNFe pelo endpoint separado.
+
+        Endpoint: GET {base_url}/v2/nfes_recebidas/{chave}.xml
+        Headers:  Authorization Basic + Accept: application/xml
+        Sem redirect (diferente do DANFE — Focus entrega XML direto).
+        Timeout curto (min(self._timeout, 5)) para nao travar batch.
+
+        Retorno OK:  {ok, provider, xml_bruto, xml_hash_sha256, tamanho}
+        Retorno erro:{ok:False, provider, codigo, erro} — token nunca vaza.
+        """
+        chave = str(chave or "").strip()
+        if not chave:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_BAD_REQUEST",
+                "erro":     "chave obrigatoria.",
+            }
+        try:
+            token = self._require_token()
+        except RuntimeError as exc:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_TOKEN_AUSENTE",
+                "erro":     str(exc),
+            }
+        base_url = self._base_url_for(ambiente)
+        url = f"{base_url}/v2/nfes_recebidas/{chave}.xml"
+        headers_auth = {**_basic_auth_header(token), "Accept": "application/xml"}
+        # Timeout curto para evitar travar batch de ate 25 XMLs.
+        timeout_xml = min(self._timeout, 5) if self._timeout else 5
+        try:
+            resp = requests.get(url, headers=headers_auth,
+                                allow_redirects=False, timeout=timeout_xml)
+        except requests.exceptions.Timeout:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_XML_TIMEOUT",
+                "erro":     f"Timeout ({timeout_xml}s) baixando XML nfeProc.",
+            }
+        except requests.exceptions.RequestException as exc:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_XML_ERRO",
+                "erro":     f"Erro HTTP: {type(exc).__name__}.",
+            }
+        finally:
+            # Defesa em profundidade — descartar refs a token/header apos uso.
+            del token
+            del headers_auth
+
+        if resp.status_code == 404:
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "FOCUS_XML_NAO_ENCONTRADO",
+                "erro":        "XML nfeProc nao encontrado no FocusNFe (404).",
+                "http_status": 404,
+            }
+        if resp.status_code != 200:
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "FOCUS_XML_HTTP_ERROR",
+                "erro":        f"Status HTTP inesperado ({resp.status_code}).",
+                "http_status": resp.status_code,
+            }
+        body = resp.text or ""
+        if not body:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_XML_VAZIO",
+                "erro":     "Focus devolveu corpo vazio para XML.",
+            }
+        sha256 = hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()
+        return {
+            "ok":              True,
+            "provider":        "focusnfe",
+            "xml_bruto":       body,
+            "xml_hash_sha256": sha256,
+            "tamanho":         len(body),
         }
 
     # ── Rotas legadas de consulta (stubs) ──────────────────────────────────

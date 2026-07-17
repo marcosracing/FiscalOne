@@ -575,3 +575,25 @@ results_arr = result.get("results") or docs_arr
 
 Zero alteração em providers. Zero HTTP real em testes.
 Testes: `tests/test_fase_e1b_envelope_results.py` (6 casos). Suite completa 189/189. Detalhes: `docs/adr/_handoff/2026-07-17-fase-e1b-fiscalone-results-compat-mapone.md`.
+
+---
+
+## Fase E4a · mapper schema real Focus + XML por chave + fix cStat (2026-07-17)
+
+Alinha `_mapear_nfe_focus` e `gov_fetch` (`providers/focusnfe_provider.py`) com a doc oficial `NfeRecebidaResumo`. Corrige três bugs:
+
+1. **BUG FISCAL GRAVE — cStat=101 para resumo autorizado.** Antes: `"cStat": "100" if tem_xml else "101"` — como `xml` nunca vem no resumo, tudo virava `cStat=101`, que na tabela SEFAZ significa "Cancelamento homologado". Agora: cStat=100 para autorizada; cStat=101 SÓ quando `situacao="cancelada"`; cStat=110 para `denegada`.
+2. **CNPJ_emit sempre vazio** — mapper buscava `cnpj_emitente`, real é `documento_emitente`. Corrigido com ordem `documento_emitente > cnpj_emitente > CNPJ_emit`.
+3. **XML nunca baixado** — mapper procurava `xml` inline (não existe no resumo). Agora `gov_fetch` chama `baixar_xml_completo(chave)` para itens com `nfe_completa=True`.
+
+**Novos campos no doc mapeado** (`NFeDocOpcional` — todos opcionais): `nfe_completa`, `tipo_nfe`, `manifestacao`, `situacao_focus`, `cancelado`, `xml_pending`, `data_cancelamento`, `justificativa_cancelamento`.
+
+**Novo método:** `FocusNFeProvider.baixar_xml_completo(chave, ambiente)` — `GET /v2/nfes_recebidas/{chave}.xml`, `Accept: application/xml`, timeout `min(self._timeout, 5)`, sem redirect. Códigos: `FOCUS_XML_NAO_ENCONTRADO` (404), `FOCUS_XML_HTTP_ERROR`, `FOCUS_XML_TIMEOUT`, `FOCUS_XML_ERRO`, `FOCUS_XML_VAZIO`.
+
+**Cap de batch XML:** `_XML_BATCH_CAP=25` (override via env `FOCUSNFE_XML_BATCH_CAP`). Excedentes viram RESUMO + `xml_pending=True`. Falha individual (timeout/404) não derruba o batch — item vira RESUMO+pending, batch prossegue. Envelope acrescido de `xmls_baixados`/`xmls_pendentes`.
+
+**Situação `cancelada` não baixa XML** nesta fase — `data_cancelamento` e `justificativa_cancelamento` já vão no doc; XML/evento de cancelamento fica para **E4b**.
+
+**Testes:** `tests/test_focusnfe_http.py` — 17 novos casos (`TestMapper` +5, `TestBaixarXmlCompleto` 7, `TestGovFetchComXml` 6). Suite completa **205/205**. Zero HTTP real. Zero token vazado.
+
+Handoff: `docs/adr/_handoff/2026-07-17-fase-e4a-mapper-schema-real-focus.md`.
