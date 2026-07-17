@@ -557,3 +557,21 @@ Base: ADR-0043 (`RLogix_shared/adr/ADR-0043-*`).
 **Segurança:** testes validam que token, header `Authorization`, prefixo `Basic`, e campos de cert nunca aparecem em envelope, body HTTP ou stdout (`_log_stdout` tem schema JSON fixo). 183/183 testes passam. Zero HTTP real.
 
 Handoff: `docs/adr/_handoff/2026-07-17-fase-d-fiscalone-provider-token-por-request.md`.
+
+---
+
+## Fase E1B · results = documentos fallback (2026-07-17)
+
+Handler `/fiscal/gov/fetch` normaliza o envelope para compat com MapOne (que consome `fo_resp["results"]`). Providers modernos como `FocusNFeProvider` preenchem `documentos[]` mas não `results[]`. Regra em `app.py:594-599`:
+
+```python
+results_arr = result.get("results") or docs_arr
+```
+
+- Provider preenche `documentos[]` → `results[]` espelha (mesma lista)
+- Provider preenche `results[]` explícito → preservado
+- Provider preenche ambos → `results[]` explícito ganha
+- Ambos vazios → `results = []`
+
+Zero alteração em providers. Zero HTTP real em testes.
+Testes: `tests/test_fase_e1b_envelope_results.py` (6 casos). Suite completa 189/189. Detalhes: `docs/adr/_handoff/2026-07-17-fase-e1b-fiscalone-results-compat-mapone.md`.

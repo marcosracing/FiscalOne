@@ -79,3 +79,10 @@ Limites preservados:
 - Blindagem: `provider="focusnfe"` remove `cert_pfx_base64`/`cert_password`/`cert_cnpj`/`cert_valid_until` do payload antes de instanciar (defesa em profundidade contra bug/legado MapOne).
 - SEFAZ 100% compatível — sem regressão. 183/183 testes passam. Zero HTTP real.
 - Detalhes: `docs/adr/_handoff/2026-07-17-fase-d-fiscalone-provider-token-por-request.md`.
+
+## Fase E1B — 2026-07-17 (results/documentos compat MapOne)
+
+- `/fiscal/gov/fetch`: `results_arr = result.get("results") or docs_arr` (app.py:594-599).
+- MapOne recebe `documentos[]` do FocusNFe também em `results[]` sem alteração no provider.
+- `results[]` explícito de outros providers preservado (SEFAZ, ADN).
+- 189/189 testes verdes (6 novos). Zero HTTP real. Sem push/deploy.

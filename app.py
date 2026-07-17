@@ -591,7 +591,12 @@ def gov_fetch():
     docs_arr    = result.get("documentos") or []
     resumos_arr = result.get("resumos") or []
     erros_arr   = result.get("erros") or []
-    results_arr = result.get("results") or []
+    # Fase E1B: providers modernos (FocusNFe) preenchem `documentos[]` mas nao
+    # `results[]`. MapOne consome `results[]`. Fallback: se provider nao entregou
+    # `results` explicito, espelhamos `documentos` para preservar compat.
+    # Providers legados que ja preenchem `results` (ex.: SEFAZ) tem esse array
+    # preservado — nunca sobrescrito.
+    results_arr = result.get("results") or docs_arr
     persistidos = len(docs_arr)
     resumos_n   = len(resumos_arr)
     eventos_n   = sum(1 for d in docs_arr + results_arr
