@@ -109,3 +109,11 @@ Limites preservados:
 - ADN NFSe (`providers/nfse_nacional_provider.py`) **intocada**. NFSe emitida/receita fora.
 - 232/232 testes verdes (+27 novos). Zero HTTP real. Zero token vazado. Sem push/deploy.
 - Detalhes: `docs/adr/_handoff/2026-07-17-fase-e4c-nfse-nacional-focusnfe.md`.
+
+## Fix — 2026-07-18 (NFSe FocusNFe · `servicos` como lista ou dict)
+
+- Bug: `_mapear_nfse_focus` tratava `item["servicos"]` só como dict; quando FocusNFe entregava lista (schema oficial `NfseRecebida`), o mapper descartava silenciosamente `valor_servicos`, `valor_iss`, `valor_liquido`, `iss_retido`, `discriminacao`, `item_lista_servico`, `codigo_cnae`.
+- Fix: helpers privados `_normalizar_servicos_nfse` (dict/list/None → dict canônico com `Decimal` para somas monetárias, `" | "` como separador de discriminação, OR para `iss_retido` entre itens) e `_normalizar_iss_retido_nfse` (bool/int/float/str; aceita `"true"/"1"/"sim"/"s"` e string numérica > 0). Ambos em `providers/focusnfe_provider.py:284-408`.
+- Mapper agora chama os helpers; `iss_retido` no doc virou `bool` (antes vinha string "False" truthy). Novos campos `item_lista_servico` e `codigo_cnae` emitidos no doc final.
+- 253/253 testes verdes (+21 novos: T1..T11 + variantes de normalização). `_mapear_nfe_focus` intocado (regressão T11). Zero HTTP real. Sem push/deploy.
+- Detalhes: `docs/adr/_handoff/2026-07-18-fix-nfse-focusnfe-servicos-lista.md`.

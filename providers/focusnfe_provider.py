@@ -23,6 +23,7 @@ import base64
 import hashlib
 import json
 import os
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import requests
@@ -281,6 +282,129 @@ def _mapear_nfe_focus(item: dict, trace_id: str) -> dict:
     return doc
 
 
+# ── Normalizadores NFSe (fix 2026-07-18 — servicos lista/dict) ────────────────
+# Schema oficial FocusNFe admite `servicos` como dict OU lista de objetos. O
+# mapper original tratava apenas dict e descartava silenciosamente listas,
+# zerando valores fiscais. Os dois helpers abaixo normalizam ambos os formatos
+# ANTES do mapper acessar campos.
+_ISS_RETIDO_TRUE = frozenset({"true", "1", "sim", "s"})
+
+
+def _normalizar_iss_retido_nfse(raw: Any) -> bool:
+    """`iss_retido` como bool. Aceita bool/int/float/string.
+
+    Regras:
+      - bool: valor direto.
+      - int/float: True se > 0.
+      - string: "true"/"1"/"sim"/"s" (case-insensitive) → True;
+        senao tenta interpretar como numero e retorna True se > 0.
+      - None ou outros: False.
+    """
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        try:
+            return raw > 0
+        except TypeError:
+            return False
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if not s:
+            return False
+        if s in _ISS_RETIDO_TRUE:
+            return True
+        try:
+            return Decimal(s) > 0
+        except (InvalidOperation, ValueError):
+            return False
+    return False
+
+
+def _dec_str_estavel(total: Decimal) -> str:
+    """Formata Decimal como string estavel com 2 casas (padrao monetario).
+
+    Compatibilidade com contrato atual do mapper (strings tipo '1500.00').
+    """
+    try:
+        return format(total.quantize(Decimal("0.01")), "f")
+    except (InvalidOperation, ValueError):
+        return format(total, "f")
+
+
+def _normalizar_servicos_nfse(raw: Any) -> dict:
+    """Normaliza `servicos` do item Focus NFSe para dict canonico.
+
+    Aceita:
+      - dict: retorna copia (sem mutar original). Comportamento legado.
+      - list: soma monetarios com Decimal, concatena discriminacao com ' | ',
+              iss_retido = OR entre itens, item_lista_servico/codigo_cnae
+              pegam o primeiro valor nao vazio.
+      - None/outros: `{}` (sem excecao).
+
+    Retorna `{}` se lista vazia ou sem itens validos (dict).
+    """
+    if isinstance(raw, dict):
+        return dict(raw)
+    if not isinstance(raw, list):
+        return {}
+
+    campos_soma = ("valor_servicos", "valor_iss", "valor_liquido")
+    totais = {c: Decimal("0") for c in campos_soma}
+    somou = {c: False for c in campos_soma}
+    discriminacoes: list[str] = []
+    item_lista = ""
+    codigo_cnae = ""
+    iss_retido_algum = False
+    houve_item_valido = False
+
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        houve_item_valido = True
+        for c in campos_soma:
+            v = item.get(c)
+            if v in (None, ""):
+                continue
+            try:
+                totais[c] += Decimal(str(v))
+                somou[c] = True
+            except (InvalidOperation, ValueError):
+                continue
+        if _normalizar_iss_retido_nfse(item.get("iss_retido")):
+            iss_retido_algum = True
+        desc = item.get("discriminacao")
+        if desc not in (None, ""):
+            desc_str = str(desc).strip()
+            if desc_str:
+                discriminacoes.append(desc_str)
+        if not item_lista:
+            il = item.get("item_lista_servico")
+            if il not in (None, ""):
+                item_lista = str(il).strip()
+        if not codigo_cnae:
+            cc = item.get("codigo_cnae")
+            if cc not in (None, ""):
+                codigo_cnae = str(cc).strip()
+
+    if not houve_item_valido:
+        return {}
+
+    out: dict[str, Any] = {}
+    for c in campos_soma:
+        if somou[c]:
+            out[c] = _dec_str_estavel(totais[c])
+    out["iss_retido"] = iss_retido_algum
+    if discriminacoes:
+        out["discriminacao"] = " | ".join(discriminacoes)
+    if item_lista:
+        out["item_lista_servico"] = item_lista
+    if codigo_cnae:
+        out["codigo_cnae"] = codigo_cnae
+    return out
+
+
 # ── Mapper NFSe Nacional (Fase E4c) ───────────────────────────────────────────
 def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
     """Mapeia item Focus (schema `NfseRecebida`) para dict compativel com
@@ -320,7 +444,11 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
 
     prestador = item.get("prestador") if isinstance(item.get("prestador"), dict) else {}
     tomador   = item.get("tomador")   if isinstance(item.get("tomador"),   dict) else {}
-    servicos  = item.get("servicos")  if isinstance(item.get("servicos"),  dict) else {}
+    # `servicos` pode vir como dict (comportamento legado) OU list de objetos
+    # (schema oficial FocusNFe). Normaliza para dict antes de acessar campos.
+    # Sem essa normalizacao, listas eram descartadas e todos os campos
+    # financeiros/fiscais viravam vazios silenciosamente.
+    servicos = _normalizar_servicos_nfse(item.get("servicos"))
 
     def _doc_e_tipo(entidade: dict) -> tuple[str, str]:
         """Extrai (documento_digitos, tipo). Aceita `cnpj` ou `cpf`."""
@@ -351,11 +479,16 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
     except (TypeError, ValueError):
         versao = 0
 
-    v_servicos = _get_str(servicos, "valor_servicos")
-    v_iss      = _get_str(servicos, "valor_iss")
-    v_liquido  = _get_str(servicos, "valor_liquido")
-    iss_retido = _get_str(servicos, "iss_retido")
+    v_servicos    = _get_str(servicos, "valor_servicos")
+    v_iss         = _get_str(servicos, "valor_iss")
+    v_liquido     = _get_str(servicos, "valor_liquido")
+    # iss_retido normalizado para bool. Antes era string via _get_str, o que
+    # deixava "False" (truthy) causar leitura errada em consumidores. Agora
+    # aceita bool/int/float/string (ver `_normalizar_iss_retido_nfse`).
+    iss_retido    = _normalizar_iss_retido_nfse(servicos.get("iss_retido"))
     discriminacao = _get_str(servicos, "discriminacao")
+    item_lista_servico = _get_str(servicos, "item_lista_servico")
+    codigo_cnae   = _get_str(servicos, "codigo_cnae")
 
     dh_emi = _get_str(item, "data_emissao")
 
@@ -388,6 +521,8 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
         "valor_liquido":   v_liquido,
         "iss_retido":      iss_retido,
         "discriminacao":   discriminacao,
+        "item_lista_servico": item_lista_servico,
+        "codigo_cnae":     codigo_cnae,
         "xinf":            discriminacao[:500] if discriminacao else "",
         # Status/situacao NFSe — nao usar cStat SEFAZ.
         "status_xml":      "RESUMO",         # promovido a COMPLETO pelo gov_fetch

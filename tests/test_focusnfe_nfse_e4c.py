@@ -20,7 +20,10 @@ import requests
 
 from providers.focusnfe_provider import (
     FocusNFeProvider,
+    _mapear_nfe_focus,
     _mapear_nfse_focus,
+    _normalizar_iss_retido_nfse,
+    _normalizar_servicos_nfse,
 )
 
 
@@ -357,6 +360,251 @@ class TestEmpresaNaoHabilitada:
         r = provider_com_token.gov_fetch(
             {"cnpj": "07219398000109", "tipo": "nfse"}, "fo-e4c")
         assert r["codigo"] == "FOCUS_FORBIDDEN"
+
+
+# ── Fix 2026-07-18 — servicos como list/dict/None + iss_retido normalizado ──
+def _item_nfse_servicos(servicos_val,
+                        chave="ABC123456789012345678901234567890123456789012"):
+    """Item NfseRecebida com `servicos` customizado (dict/list/None/etc.)."""
+    return {
+        "chave":       chave,
+        "versao":      99,
+        "status":      1,
+        "numero":      "2001",
+        "serie":       "1",
+        "data_emissao": "2026-07-18T10:00:00-03:00",
+        "prestador":   {"cnpj": "12345678000199",
+                        "razao_social": "Prestador LTDA"},
+        "tomador":     {"cnpj": "07219398000109",
+                        "razao_social": "Tomador SA"},
+        "servicos":    servicos_val,
+    }
+
+
+class TestServicosListaOuDict:
+    def test_t1_servicos_lista_soma_decimal(self):
+        """T1 — lista com 2 itens: soma valores, iss_retido=True, discriminacao
+        concatenada, item_lista_servico/codigo_cnae preenchidos."""
+        servicos_list = [
+            {"valor_servicos": "1000.00", "valor_iss": "50.00",
+             "valor_liquido": "950.00",  "iss_retido": True,
+             "discriminacao": "Servico A",
+             "item_lista_servico": "01.05", "codigo_cnae": "6201501"},
+            {"valor_servicos": "1000.00", "valor_iss": "50.00",
+             "valor_liquido": "950.00",  "iss_retido": True,
+             "discriminacao": "Servico B",
+             "item_lista_servico": "01.06", "codigo_cnae": "6202300"},
+        ]
+        d = _mapear_nfse_focus(_item_nfse_servicos(servicos_list), "fix")
+        assert d["valor_total"]   == "2000.00"
+        assert d["valor_iss"]     == "100.00"
+        assert d["valor_liquido"] == "1900.00"
+        assert d["iss_retido"] is True
+        assert "Servico A" in d["discriminacao"]
+        assert "Servico B" in d["discriminacao"]
+        assert " | " in d["discriminacao"]
+        assert d["item_lista_servico"] == "01.05"
+        assert d["codigo_cnae"]        == "6201501"
+
+    def test_t2_servicos_dict_legado_preservado(self):
+        """T2 — dict legado: mesmos campos, sem regressao."""
+        servicos_dict = {"valor_servicos": "1500.00",
+                         "valor_iss":      "75.00",
+                         "valor_liquido":  "1425.00",
+                         "iss_retido":     True,
+                         "discriminacao":  "Servico legado",
+                         "item_lista_servico": "01.07",
+                         "codigo_cnae":    "6203100"}
+        original = dict(servicos_dict)  # copia para checar nao-mutacao
+        d = _mapear_nfse_focus(_item_nfse_servicos(servicos_dict), "fix")
+        assert d["valor_total"]   == "1500.00"
+        assert d["valor_iss"]     == "75.00"
+        assert d["valor_liquido"] == "1425.00"
+        assert d["iss_retido"] is True
+        assert d["discriminacao"] == "Servico legado"
+        assert d["item_lista_servico"] == "01.07"
+        assert d["codigo_cnae"]        == "6203100"
+        # nao mutou o dict original recebido
+        assert servicos_dict == original
+
+    def test_t3_servicos_lista_vazia(self):
+        """T3 — lista vazia: campos vazios/zero, sem excecao."""
+        d = _mapear_nfse_focus(_item_nfse_servicos([]), "fix")
+        assert d["valor_total"]   == ""
+        assert d["valor_iss"]     == ""
+        assert d["valor_liquido"] == ""
+        assert d["iss_retido"] is False
+        assert d["discriminacao"] == ""
+        assert d["item_lista_servico"] == ""
+        assert d["codigo_cnae"]        == ""
+
+    def test_t4_servicos_none(self):
+        """T4 — None: campos vazios/zero, sem excecao."""
+        d = _mapear_nfse_focus(_item_nfse_servicos(None), "fix")
+        assert d["valor_total"]   == ""
+        assert d["valor_iss"]     == ""
+        assert d["valor_liquido"] == ""
+        assert d["iss_retido"] is False
+        assert d["discriminacao"] == ""
+        assert d["item_lista_servico"] == ""
+        assert d["codigo_cnae"]        == ""
+
+
+class TestIssRetidoNormalizacao:
+    def test_t5_true(self):
+        assert _normalizar_iss_retido_nfse(True) is True
+
+    def test_t6_string_numerica_positiva(self):
+        assert _normalizar_iss_retido_nfse("75.00") is True
+
+    def test_t7_zero_int(self):
+        assert _normalizar_iss_retido_nfse(0) is False
+
+    def test_t8_false(self):
+        assert _normalizar_iss_retido_nfse(False) is False
+
+    def test_variantes_string_truthy(self):
+        for s in ("true", "TRUE", "1", "sim", "SIM", "S", "s"):
+            assert _normalizar_iss_retido_nfse(s) is True
+
+    def test_variantes_falsy(self):
+        for v in (None, "", "0", "0.00", "false", "nao", "n", "-1"):
+            assert _normalizar_iss_retido_nfse(v) is False
+
+    def test_string_numero_negativo_falso(self):
+        assert _normalizar_iss_retido_nfse("-10.5") is False
+
+    def test_float_positivo(self):
+        assert _normalizar_iss_retido_nfse(0.01) is True
+
+
+class TestIssRetidoAgregadoLista:
+    def test_t9_primeiro_false_segundo_true_agrega_true(self):
+        """T9 — lista com item1 iss_retido=False e item2 True → True."""
+        servicos_list = [
+            {"valor_servicos": "500.00", "iss_retido": False},
+            {"valor_servicos": "500.00", "iss_retido": True},
+        ]
+        d = _mapear_nfse_focus(_item_nfse_servicos(servicos_list), "fix")
+        assert d["iss_retido"] is True
+
+    def test_todos_false_agrega_false(self):
+        servicos_list = [
+            {"valor_servicos": "500.00", "iss_retido": False},
+            {"valor_servicos": "500.00", "iss_retido": False},
+        ]
+        d = _mapear_nfse_focus(_item_nfse_servicos(servicos_list), "fix")
+        assert d["iss_retido"] is False
+
+
+class TestMapperCompletoPayloadRealista:
+    def test_t10_payload_realista_lista_servicos(self):
+        """T10 — mapper completo com payload NfseRecebida realista + servicos
+        como lista. Contrato NFSe preservado (sem cStat SEFAZ)."""
+        payload = {
+            "chave":              "NFSE20260718000000000000000000000000000000AA",
+            "versao":             123,
+            "status":             1,
+            "numero":             "5001",
+            "serie":              "A",
+            "codigo_verificacao": "XYZ9",
+            "data_emissao":       "2026-07-18T09:30:00-03:00",
+            "competencia":        "2026-07",
+            "prestador": {"cnpj": "11222333000181",
+                          "razao_social": "Alpha Servicos LTDA",
+                          "inscricao_municipal": "99999"},
+            "tomador":   {"cnpj": "07219398000109",
+                          "razao_social": "Racing Logistica"},
+            "servicos": [
+                {"valor_servicos": "800.00",  "valor_iss": "40.00",
+                 "valor_liquido": "760.00",   "iss_retido": True,
+                 "discriminacao": "Consultoria mensal",
+                 "item_lista_servico": "17.05", "codigo_cnae": "7020400"},
+                {"valor_servicos": "1200.00", "valor_iss": "60.00",
+                 "valor_liquido": "1140.00",  "iss_retido": True,
+                 "discriminacao": "Analise tecnica"},
+            ],
+            "url_xml": "https://exemplo/nfse/xml/1.xml",
+        }
+        d = _mapear_nfse_focus(payload, "fix-t10")
+        # Prestador → emit_*
+        assert d["emit_cnpj"]     == "11222333000181"
+        assert d["emit_doc_tipo"] == "cnpj"
+        assert d["emit_nome"]     == "Alpha Servicos LTDA"
+        assert d["emit_ie"]       == "99999"
+        # Tomador → dest_*
+        assert d["dest_cnpj"]     == "07219398000109"
+        assert d["dest_nome"]     == "Racing Logistica"
+        # Valores agregados
+        assert d["valor_total"]   == "2000.00"
+        assert d["valor_iss"]     == "100.00"
+        assert d["valor_liquido"] == "1900.00"
+        assert d["iss_retido"] is True
+        assert "Consultoria mensal" in d["discriminacao"]
+        assert "Analise tecnica"    in d["discriminacao"]
+        assert d["item_lista_servico"] == "17.05"
+        assert d["codigo_cnae"]        == "7020400"
+        # Contrato NFSe (sem cStat SEFAZ)
+        assert d["type"] == "nfse"
+        assert d["doc_type"] == "nfse"
+        assert d["import_origin"] == "fiscalone_focusnfe_nfse"
+        assert d["status_sefaz"]  == "focusnfe"
+        assert "cStat" not in d
+        assert "xMotivo" not in d
+
+
+class TestRegressaoNfe:
+    def test_t11_mapper_nfe_intocado(self):
+        """T11 — `_mapear_nfe_focus` mantem contrato E4a: cStat=100 para
+        autorizada, CNPJ_emit vindo de `documento_emitente`."""
+        item_nfe = {
+            "chave_nfe":         "35240711222333000181550010000012341234567890",
+            "situacao":          "autorizada",
+            "documento_emitente": "11222333000181",
+            "cnpj_destinatario": "07219398000109",
+            "valor_total":       "999.99",
+            "valor_icms":        "180.00",
+            "numero":            "1234",
+            "serie":             "1",
+            "nome_emitente":     "Fornecedor XPTO",
+            "data_emissao":      "2026-07-15T10:00:00-03:00",
+            "protocolo":         "135260000001234",
+            "versao":            77,
+            "nfe_completa":      False,
+            "tipo_nfe":          "entrada",
+        }
+        d = _mapear_nfe_focus(item_nfe, "regressao")
+        assert d["chNFe"]         == "35240711222333000181550010000012341234567890"
+        assert d["cStat"]         == "100"
+        assert d["xMotivo"]       == "Resumo FocusNFe"
+        assert d["status_xml"]    == "RESUMO"
+        assert d["CNPJ_emit"]     == "11222333000181"
+        assert d["CNPJ_dest"]     == "07219398000109"
+        assert d["import_origin"] == "fiscalone_focusnfe"
+        assert d["parser_version"] == "focus_v2"
+        assert d["nfe_completa"]  is False
+        assert d["cancelado"]     == 0
+
+
+class TestNormalizadorHelperIsolado:
+    def test_dict_retorna_copia(self):
+        d = {"valor_servicos": "1", "iss_retido": True}
+        out = _normalizar_servicos_nfse(d)
+        assert out == d
+        assert out is not d  # copia
+
+    def test_lista_vazia_retorna_dict_vazio(self):
+        assert _normalizar_servicos_nfse([]) == {}
+
+    def test_lista_apenas_itens_invalidos_retorna_dict_vazio(self):
+        assert _normalizar_servicos_nfse([1, "x", None]) == {}
+
+    def test_none_retorna_dict_vazio(self):
+        assert _normalizar_servicos_nfse(None) == {}
+
+    def test_tipo_estranho_retorna_dict_vazio(self):
+        assert _normalizar_servicos_nfse(123) == {}
+        assert _normalizar_servicos_nfse("foo") == {}
 
 
 # ── Seguranca envelope NFSe ──────────────────────────────────────────────────

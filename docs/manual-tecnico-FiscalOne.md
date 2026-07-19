@@ -617,3 +617,43 @@ Estende `FocusNFeProvider` para NFSe Nacional recebida (tenant = tomador). ADN N
 **Testes:** `tests/test_focusnfe_nfse_e4c.py` (27 casos: mapper 7, gov_fetch tipo NFSe 4, url_xml 5, baixar_xml_nfse 7, empresa não habilitada 3, segurança 1). Suite completa **232/232**. Zero HTTP real. Zero token vazado.
 
 Handoff: `docs/adr/_handoff/2026-07-17-fase-e4c-nfse-nacional-focusnfe.md`.
+
+---
+
+## Fix · NFSe FocusNFe · `servicos` como lista ou dict (2026-07-18)
+
+Correção de bug silencioso no `_mapear_nfse_focus`: o campo `servicos`
+do schema oficial `NfseRecebida` pode vir como **lista** (formato oficial
+com N linhas de serviço) ou como **dict** (compat legado). O mapper
+original só aceitava dict e caía em `{}` para lista, descartando valores
+fiscais (`valor_servicos`, `valor_iss`, `valor_liquido`, `iss_retido`,
+`discriminacao`).
+
+**Helpers novos** (`providers/focusnfe_provider.py:284-408`):
+
+- `_normalizar_iss_retido_nfse(raw) -> bool` — aceita `bool`, `int`,
+  `float`, `str`. Strings `"true"/"1"/"sim"/"s"` (case-insensitive) e
+  números > 0 → `True`. `None` / outros → `False`. Antes o mapper lia
+  `iss_retido` via `_get_str`, o que transformava `False` em `"False"`
+  (string truthy) — bug independente sanado no mesmo fix.
+- `_normalizar_servicos_nfse(raw) -> dict` — dispatch por tipo:
+  - `dict` → cópia (não muta original), preserva comportamento legado;
+  - `list` → soma monetários com **`Decimal`** (nunca `float`, para
+    evitar drift binário em campos fiscais), formatação estável 2 casas;
+    `iss_retido` = OR entre itens (conservador: retenção falso-negativo
+    gera passivo tributário); `discriminacao` concatenada com `" | "`;
+    `item_lista_servico` / `codigo_cnae` = primeiro valor não vazio;
+  - `None` / tipo estranho → `{}` (sem exceção).
+
+**Mapper** (`providers/focusnfe_provider.py:451-491`):
+
+- `servicos = _normalizar_servicos_nfse(item.get("servicos"))`.
+- `iss_retido = _normalizar_iss_retido_nfse(servicos.get("iss_retido"))`
+  (agora **bool** no doc, antes era string).
+- Novos campos no doc final: `item_lista_servico`, `codigo_cnae`.
+
+**Testes:** `tests/test_focusnfe_nfse_e4c.py` — 21 novos casos (T1..T11 +
+variantes de normalização). Suite completa **253/253**.
+`_mapear_nfe_focus` intocado (T11). Zero HTTP real. Zero regressão.
+
+Handoff: `docs/adr/_handoff/2026-07-18-fix-nfse-focusnfe-servicos-lista.md`.
