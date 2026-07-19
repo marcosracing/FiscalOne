@@ -699,7 +699,125 @@ def _status_para_codigo(codigo):
     if codigo in ("FOCUS_TIMEOUT", "FOCUS_UNAVAILABLE", "FOCUS_SERVER_ERROR",
                   "FOCUS_HTTP_ERROR", "FOCUS_PARSE_ERROR", "FOCUS_SCHEMA_ERROR"):
         return 502
+    # Fase E4b-1A — codigos de manifestacao de Ciencia (evento 210210).
+    if codigo in ("FOCUS_MANIFESTO_TIPO_NAO_SUPORTADO",
+                  "FOCUS_MANIFESTO_CHAVE_INVALIDA",
+                  "FOCUS_MANIFESTO_PROVIDER_INVALIDO",
+                  "FOCUS_MANIFESTO_INVALIDO"):
+        return 400
+    if codigo == "FOCUS_MANIFESTO_NAO_ENCONTRADO":
+        return 404
+    if codigo == "FOCUS_MANIFESTO_CONFLITO":
+        return 409
+    if codigo == "FOCUS_MANIFESTO_HTTP_ERROR":
+        return 502
     return 500
+
+# ── POST /fiscal/nfe/recebida/manifesto ───────────────────────────────────────
+
+@app.route("/fiscal/nfe/recebida/manifesto", methods=["POST"])
+def nfe_recebida_manifesto():
+    """
+    Manifestacao de Ciencia da Operacao de NF-e recebida via FocusNFe.
+
+    Fase E4b-1A — FiscalOne stateless. Nao persiste nada.
+      - Suporta apenas tipo="ciencia" (evento SEFAZ 210210).
+      - Suporta apenas provider="focusnfe".
+      - `confirmacao` (210200), `desconhecimento` (210220) e
+        `nao_realizada` (210240) permanecem BLOQUEADOS.
+      - NF-e/CT-e/NFS-e/MDF-e emissao seguem bloqueadas (rota separada).
+
+    Payload:
+      {
+        "chave":           "44_digitos",
+        "tipo":            "ciencia",
+        "ambiente":        "producao"|"homologacao",
+        "focusnfe_token":  "<token>",
+        "provider":        "focusnfe"   (opcional; default focusnfe)
+      }
+
+    focusnfe_token, cert_pfx_base64, cert_password sao removidos do payload
+    antes de qualquer log/retorno.
+    """
+    trace_id      = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+
+    if _producao_bloqueada():
+        return _bloqueio_producao("nfe_recebida_manifesto", trace_id, source_system)
+
+    try:
+        payload = request.get_json(silent=True) or {}
+    except Exception:
+        payload = {}
+
+    if not isinstance(payload, dict) or not payload:
+        _log_stdout("nfe_recebida_manifesto", "erro", trace_id,
+                    source_system=source_system,
+                    erro_msg="payload JSON ausente ou invalido")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "PAYLOAD_INVALIDO",
+            "erro":     "Payload JSON obrigatorio (chave, tipo, ambiente, focusnfe_token).",
+        }), 400
+
+    # Provider — so aceita focusnfe. Default focusnfe se ausente.
+    provider_payload = (payload.get("provider") or "focusnfe").strip().lower()
+    if provider_payload != "focusnfe":
+        _log_stdout("nfe_recebida_manifesto", "erro", trace_id,
+                    source_system=source_system,
+                    erro_msg=f"FOCUS_MANIFESTO_PROVIDER_INVALIDO: {provider_payload!r}")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "FOCUS_MANIFESTO_PROVIDER_INVALIDO",
+            "erro":     "Manifestacao de Ciencia so disponivel via provider='focusnfe'.",
+        }), 400
+
+    # Sanitizacao — POP campos sensiveis ANTES de qualquer log/serializacao.
+    focusnfe_token = payload.pop("focusnfe_token", None)
+    payload.pop("cert_pfx_base64", None)
+    payload.pop("cert_password", None)
+    payload.pop("cert_cnpj", None)
+    payload.pop("cert_valid_until", None)
+    # Cabecalho eventualmente injetado no body — remover por defesa.
+    payload.pop("Authorization", None)
+    payload.pop("authorization", None)
+
+    chave    = str(payload.get("chave") or "").strip()
+    tipo     = str(payload.get("tipo") or "").strip().lower()
+    ambiente = str(payload.get("ambiente") or "").strip().lower() or None
+
+    try:
+        provider = get_provider("focusnfe", token=focusnfe_token)
+        resp = provider.manifestar_nfe_recebida(chave, tipo, ambiente, trace_id)
+    except Exception as e:
+        _log_stdout("nfe_recebida_manifesto", "erro", trace_id,
+                    source_system=source_system,
+                    erro_msg=f"{type(e).__name__}: excecao interna")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "ERRO_INTERNO",
+            "erro":     "Erro interno ao manifestar — verifique logs do FiscalOne.",
+        }), 500
+
+    # Log operacional — chave mascarada, sem token/xml/authorization/body.
+    chave_mascarada = f"{chave[:6]}***{chave[-4:]}" if len(chave) == 44 else "***"
+    _log_stdout(
+        "nfe_recebida_manifesto",
+        "ok" if resp.get("ok") else "erro",
+        trace_id,
+        source_system=source_system,
+        chave_doc=chave_mascarada,
+        doc_type="nfe",
+        cstat=resp.get("cstat"),
+        erro_msg=resp.get("codigo") if not resp.get("ok") else None,
+    )
+
+    status = 200 if resp.get("ok") else _status_para_codigo(resp.get("codigo"))
+    return jsonify(resp), status
+
 
 # ── Rotas legadas (provider pattern — mantidas, stubs) ────────────────────────
 

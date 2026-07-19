@@ -657,3 +657,74 @@ variantes de normalização). Suite completa **253/253**.
 `_mapear_nfe_focus` intocado (T11). Zero HTTP real. Zero regressão.
 
 Handoff: `docs/adr/_handoff/2026-07-18-fix-nfse-focusnfe-servicos-lista.md`.
+
+---
+
+## E4b-1A · Ciência NF-e recebida via FocusNFe (2026-07-19)
+
+Endpoint específico **`POST /fiscal/nfe/recebida/manifesto`** para
+manifestação de **Ciência da Operação** (evento SEFAZ **210210**) de NF-e
+recebida via FocusNFe. Fase FiscalOne-only e stateless — MapOne receberá
+ajuste em E4b-1B.
+
+**Provider** (`providers/focusnfe_provider.py`) — método novo
+`manifestar_nfe_recebida(chave, tipo="ciencia", ambiente, trace_id)`:
+
+- `POST /v2/nfes_recebidas/{chave}/manifesto` com body `{"tipo":"ciencia"}`,
+  `Authorization: Basic base64(token:)`, `allow_redirects=False`.
+- Travas duras:
+  - `tipo != "ciencia"` → `FOCUS_MANIFESTO_TIPO_NAO_SUPORTADO` (sem POST).
+  - `chave` != 44 dígitos numéricos → `FOCUS_MANIFESTO_CHAVE_INVALIDA`.
+  - Token ausente → `FOCUS_TOKEN_AUSENTE`.
+- Mapa HTTP:
+  - `200/201/202` → `MANIFESTO_OK` (envelope com `evento=210210`, `cstat`,
+    `xmotivo`, `protocolo`, `http_status`).
+  - `400` → `FOCUS_MANIFESTO_INVALIDO`.
+  - `401` → `FOCUS_AUTH_ERROR`.
+  - `403` → `FOCUS_FORBIDDEN`.
+  - `404` → `FOCUS_MANIFESTO_NAO_ENCONTRADO`.
+  - `409` / `422` → `FOCUS_MANIFESTO_CONFLITO` (evento já registrado, regra
+    SEFAZ, etc).
+  - `429` → `FOCUS_RATE_LIMIT`.
+  - `5xx` ou `RequestException` → `FOCUS_MANIFESTO_HTTP_ERROR`.
+- Log INFO só com **chave mascarada** (`352606***1231`). Nunca token,
+  Authorization, XML, payload bruto ou body Focus.
+
+**Rota** (`app.py`):
+
+- Só aceita `provider="focusnfe"` (default e único). Qualquer outro →
+  `FOCUS_MANIFESTO_PROVIDER_INVALIDO` (400).
+- **POP** de campos sensíveis do payload antes de qualquer log/envelope:
+  `focusnfe_token`, `cert_pfx_base64`, `cert_password`, `cert_cnpj`,
+  `cert_valid_until`, `Authorization` / `authorization`.
+- Emissão NF-e/CT-e/NFS-e/MDF-e permanece bloqueada por design (rotas
+  separadas retornam 403 `EMISSAO_BLOQUEADA`).
+
+**Codigos novos em `_status_para_codigo` (`app.py`)**:
+
+| Código | HTTP |
+|---|---|
+| `FOCUS_MANIFESTO_TIPO_NAO_SUPORTADO` | 400 |
+| `FOCUS_MANIFESTO_CHAVE_INVALIDA` | 400 |
+| `FOCUS_MANIFESTO_PROVIDER_INVALIDO` | 400 |
+| `FOCUS_MANIFESTO_INVALIDO` | 400 |
+| `FOCUS_MANIFESTO_NAO_ENCONTRADO` | 404 |
+| `FOCUS_MANIFESTO_CONFLITO` | 409 |
+| `FOCUS_MANIFESTO_HTTP_ERROR` | 502 |
+
+**Bloqueado nesta fase (SEFAZ mantém definição, FiscalOne não expõe):**
+
+- Confirmação (210200), Desconhecimento (210220), Não realizada (210240).
+
+**Fase / escopo:**
+
+- FiscalOne continua stateless — sem banco, sem migration, sem dependência
+  PG/Oracle/ATP.
+- MapOne fará dry-run/auditoria/execução controlada em E4b-1B.
+
+**Testes:** `tests/test_manifesto_ciencia.py` — 41 novos casos (travas,
+mapeamento HTTP, sanitização de payload, regressão de emissão bloqueada,
+não vaza token/Authorization/XML). Suite completa **294/294** verde. Zero
+POST real ao FocusNFe.
+
+Handoff: `docs/adr/_handoff/2026-07-19-e4b1a-fiscalone-manifesto-ciencia.md`.

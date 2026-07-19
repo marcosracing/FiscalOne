@@ -1183,6 +1183,186 @@ class FocusNFeProvider(GovProvider):
             "tamanho":         len(body),
         }
 
+    # ── manifestar_nfe_recebida — evento 210210 (Fase E4b-1A) ─────────────
+    def manifestar_nfe_recebida(self, chave, tipo="ciencia",
+                                ambiente=None, trace_id=None) -> dict:
+        """Manifestacao de Ciencia da Operacao de NF-e recebida via FocusNFe.
+
+        Endpoint FocusNFe: POST /v2/nfes_recebidas/{chave}/manifesto
+        Body: {"tipo": "ciencia"}
+        Evento SEFAZ: 210210 (Ciencia da Operacao).
+
+        Travamentos (Fase E4b-1A):
+          - `tipo` deve ser exatamente "ciencia". `confirmacao` (210200),
+            `desconhecimento` (210220) e `nao_realizada` (210240) ficam
+            bloqueados nesta fase — retornam FOCUS_MANIFESTO_TIPO_NAO_SUPORTADO.
+          - `chave` deve ter exatamente 44 digitos numericos — senao
+            FOCUS_MANIFESTO_CHAVE_INVALIDA.
+
+        Retorno OK (envelope canonico, sem dados sensiveis):
+          {ok, provider, codigo=MANIFESTO_OK, trace_id, chave, tipo,
+           evento="210210", cstat, xmotivo, protocolo, http_status}
+
+        Retorno erro: envelope minimo `{ok:False, provider, codigo, erro,
+        trace_id, http_status?}`. Token, Authorization, XML e payload bruto
+        NUNCA aparecem em envelope ou log.
+        """
+        import logging as _logging
+        _log = _logging.getLogger("fiscalone.focusnfe")
+
+        # ── Trava 1: tipo ─────────────────────────────────────────────────
+        tipo_norm = str(tipo or "").strip().lower()
+        if tipo_norm != "ciencia":
+            return {
+                "ok":        False,
+                "provider":  "focusnfe",
+                "codigo":    "FOCUS_MANIFESTO_TIPO_NAO_SUPORTADO",
+                "erro":      (
+                    "Apenas tipo='ciencia' (evento 210210) e suportado nesta fase. "
+                    "confirmacao, desconhecimento e nao_realizada permanecem bloqueados."
+                ),
+                "trace_id":  trace_id,
+            }
+
+        # ── Trava 2: chave ────────────────────────────────────────────────
+        chave_norm = str(chave or "").strip()
+        if len(chave_norm) != 44 or not chave_norm.isdigit():
+            return {
+                "ok":        False,
+                "provider":  "focusnfe",
+                "codigo":    "FOCUS_MANIFESTO_CHAVE_INVALIDA",
+                "erro":      "chave NF-e deve ter exatamente 44 digitos numericos.",
+                "trace_id":  trace_id,
+            }
+
+        # ── Trava 3: token ────────────────────────────────────────────────
+        try:
+            token = self._require_token()
+        except RuntimeError as exc:
+            return {
+                "ok":        False,
+                "provider":  "focusnfe",
+                "codigo":    "FOCUS_TOKEN_AUSENTE",
+                "erro":      str(exc),
+                "trace_id":  trace_id,
+            }
+
+        # ── HTTP POST ─────────────────────────────────────────────────────
+        base_url = self._base_url_for(ambiente)
+        url = f"{base_url}/v2/nfes_recebidas/{chave_norm}/manifesto"
+        headers = {
+            **_basic_auth_header(token),
+            "Content-Type": "application/json",
+            "Accept":       "application/json",
+        }
+        body = {"tipo": "ciencia"}
+
+        # Log INFO com chave mascarada — nunca token/Authorization/body.
+        chave_mascarada = f"{chave_norm[:6]}***{chave_norm[-4:]}"
+        _log.info("focusnfe.manifesto.request chave=%s tipo=ciencia trace_id=%s",
+                  chave_mascarada, trace_id)
+
+        resp = None
+        try:
+            try:
+                resp = requests.post(url, json=body, headers=headers,
+                                     timeout=self._timeout,
+                                     allow_redirects=False)
+            except requests.exceptions.RequestException as exc:
+                _log.info(
+                    "focusnfe.manifesto.http_error chave=%s tipo=%s trace_id=%s",
+                    chave_mascarada, type(exc).__name__, trace_id,
+                )
+                return {
+                    "ok":        False,
+                    "provider":  "focusnfe",
+                    "codigo":    "FOCUS_MANIFESTO_HTTP_ERROR",
+                    "erro":      f"Erro HTTP inesperado: {type(exc).__name__}.",
+                    "trace_id":  trace_id,
+                }
+
+            status_code = resp.status_code
+
+            # 200/201/202 -> sucesso
+            if status_code in (200, 201, 202):
+                cstat = ""
+                xmotivo = ""
+                protocolo = ""
+                try:
+                    body_json = resp.json()
+                except (ValueError, TypeError):
+                    body_json = {}
+                if isinstance(body_json, dict):
+                    cstat     = str(body_json.get("cstat")     or body_json.get("codigo_sefaz") or "").strip()
+                    xmotivo   = str(body_json.get("xmotivo")   or body_json.get("mensagem_sefaz") or "").strip()
+                    protocolo = str(body_json.get("protocolo") or body_json.get("numero_protocolo") or "").strip()
+                _log.info(
+                    "focusnfe.manifesto.ok chave=%s cstat=%s http=%s trace_id=%s",
+                    chave_mascarada, cstat or "-", status_code, trace_id,
+                )
+                return {
+                    "ok":          True,
+                    "provider":    "focusnfe",
+                    "codigo":      "MANIFESTO_OK",
+                    "trace_id":    trace_id,
+                    "chave":       chave_norm,
+                    "tipo":        "ciencia",
+                    "evento":      "210210",
+                    "cstat":       cstat,
+                    "xmotivo":     xmotivo,
+                    "protocolo":   protocolo,
+                    "http_status": status_code,
+                }
+
+            # Mapeamento de erros HTTP
+            mapa_erro = {
+                400: ("FOCUS_MANIFESTO_INVALIDO",
+                      "FocusNFe rejeitou o manifesto (400)."),
+                401: ("FOCUS_AUTH_ERROR",
+                      "Token FocusNFe invalido (401)."),
+                403: ("FOCUS_FORBIDDEN",
+                      "FocusNFe negou acesso ao manifesto (403)."),
+                404: ("FOCUS_MANIFESTO_NAO_ENCONTRADO",
+                      "NF-e nao encontrada para manifesto (404)."),
+                409: ("FOCUS_MANIFESTO_CONFLITO",
+                      "Conflito ao manifestar (409) — evento pode ja existir."),
+                422: ("FOCUS_MANIFESTO_CONFLITO",
+                      "Manifesto rejeitado por regra SEFAZ (422)."),
+                429: ("FOCUS_RATE_LIMIT",
+                      "Rate limit da FocusNFe atingido (429)."),
+            }
+            if status_code in mapa_erro:
+                codigo, mensagem = mapa_erro[status_code]
+            elif status_code >= 500:
+                codigo   = "FOCUS_MANIFESTO_HTTP_ERROR"
+                mensagem = f"FocusNFe respondeu erro de servidor ({status_code})."
+            else:
+                codigo   = "FOCUS_MANIFESTO_HTTP_ERROR"
+                mensagem = f"Status HTTP inesperado ({status_code})."
+
+            _log.info(
+                "focusnfe.manifesto.erro chave=%s codigo=%s http=%s trace_id=%s",
+                chave_mascarada, codigo, status_code, trace_id,
+            )
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      codigo,
+                "erro":        mensagem,
+                "trace_id":    trace_id,
+                "http_status": status_code,
+            }
+        finally:
+            # Defesa em profundidade — descarta refs a token/headers apos uso.
+            try:
+                del token
+            except NameError:
+                pass
+            try:
+                del headers
+            except NameError:
+                pass
+
     # ── Rotas legadas de consulta (stubs) ──────────────────────────────────
     def sync(self, cnpj):                                        return dict(_STUB)
     def listar_nfe(self, cnpj, pagina=1):                        return dict(_STUB)
