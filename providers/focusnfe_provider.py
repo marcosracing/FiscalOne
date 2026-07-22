@@ -620,10 +620,10 @@ class FocusNFeProvider(GovProvider):
 
         base_url = self._base_url_for(ambiente)
         # Fase E4c — rota canonica por tipo. NFSe usa endpoint separado
-        # `/v2/nfses_recebidas` (doc oficial). Cursor `versao` incremental
+        # `/v2/nfsens_recebidas` (NFSe Nacional recebida). Cursor `versao` incremental
         # eh comum aos dois — nao ha divergencia de contrato.
         if tipo == "nfse":
-            url = f"{base_url}/v2/nfses_recebidas"
+            url = f"{base_url}/v2/nfsens_recebidas"
         else:
             url = f"{base_url}/v2/nfes_recebidas"
         headers = {
@@ -1065,7 +1065,7 @@ class FocusNFeProvider(GovProvider):
     # ── baixar_xml_nfse — nfse XML via url_xml (Fase E4c) ────────────────
     def baixar_xml_nfse(self, url_xml: str) -> dict:
         """Baixa XML NFSe Nacional a partir da `url_xml` fornecida pelo item
-        da listagem `/v2/nfses_recebidas`.
+        da listagem `/v2/nfsens_recebidas`.
 
         Diferencas vs `baixar_xml_completo` (NF-e por chave):
         - URL nao eh construida — vem do proprio item Focus.

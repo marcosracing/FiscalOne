@@ -604,7 +604,7 @@ Handoff: `docs/adr/_handoff/2026-07-17-fase-e4a-mapper-schema-real-focus.md`.
 
 Estende `FocusNFeProvider` para NFSe Nacional recebida (tenant = tomador). ADN NFSe **não é tocada**. NFSe emitida/receita fica fora.
 
-**Rota + parâmetros** (`providers/focusnfe_provider.py:340-378`): `tipo="nfse"` habilitado; URL `/v2/nfses_recebidas`; `params["completa"]="1"` só para NFSe. Cursor `versao` reusado.
+**Rota + parâmetros** (`providers/focusnfe_provider.py:340-378`): `tipo="nfse"` habilitado; URL `/v2/nfsens_recebidas`; `params["completa"]="1"` só para NFSe. Cursor `versao` reusado.
 
 **Mapper** (`_mapear_nfse_focus`, `providers/focusnfe_provider.py:284-402`): contrato dedicado ao schema `NfseRecebida`. **Sem cStat SEFAZ**, **sem validação DV DFe 44**. Emite `situacao_nfse ∈ {autorizada, cancelada, substituida}` a partir de `status ∈ {1,2,3}`. Prestador → `emit_*` (fornecedor); tomador → `dest_*` (tenant). `servicos.valor_servicos` → `valor_total`. `import_origin = "fiscalone_focusnfe_nfse"` (dedicado — distingue de NF-e). `status_sefaz = "focusnfe"`.
 
@@ -728,3 +728,26 @@ não vaza token/Authorization/XML). Suite completa **294/294** verde. Zero
 POST real ao FocusNFe.
 
 Handoff: `docs/adr/_handoff/2026-07-19-e4b1a-fiscalone-manifesto-ciencia.md`.
+
+---
+
+## Fix · NFSe FocusNFe · rota `nfsens_recebidas` (2026-07-22)
+
+Discovery em produção mostrou `FOCUS_HTTP_ERROR` com HTTP 404 em
+`gov_fetch(tipo="nfse")` para os tenants 1 e 2. NF-e seguia OK, então
+o problema estava isolado na rota NFSe do provider FocusNFe.
+
+Correção em `providers/focusnfe_provider.py`:
+
+- `tipo="nfse"` agora consulta `/v2/nfsens_recebidas`.
+- NF-e continua em `/v2/nfes_recebidas`.
+- Parâmetros NFSe preservados: `cnpj`, `versao`, `completa="1"`.
+- Emissão NF-e/CT-e/NFS-e/MDF-e permanece bloqueada.
+
+Teste atualizado:
+
+- `tests/test_focusnfe_nfse_e4c.py::
+  TestGovFetchTipoNfse.test_url_nfsens_recebidas_com_completa_1`.
+
+Handoff:
+`docs/adr/_handoff/2026-07-22-fix-nfse-focusnfe-rota-nfsens.md`.

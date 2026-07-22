@@ -101,7 +101,7 @@ Limites preservados:
 
 ## Fase E4c — 2026-07-17 (NFSe Nacional recebidas via FocusNFe)
 
-- `FocusNFeProvider.gov_fetch` aceita `tipo="nfse"` (`providers/focusnfe_provider.py:340`). URL `/v2/nfses_recebidas` + `params["completa"]="1"`. Cursor `versao` reusado. CT-e / MDF-e permanecem bloqueados.
+- `FocusNFeProvider.gov_fetch` aceita `tipo="nfse"` (`providers/focusnfe_provider.py:340`). URL `/v2/nfsens_recebidas` + `params["completa"]="1"`. Cursor `versao` reusado. CT-e / MDF-e permanecem bloqueados.
 - Novo mapper `_mapear_nfse_focus` (`providers/focusnfe_provider.py:284-402`) — schema `NfseRecebida`. Sem cStat SEFAZ, sem DV DFe 44. `situacao_nfse ∈ {autorizada, cancelada, substituida}` a partir de `status ∈ {1,2,3}`. `import_origin="fiscalone_focusnfe_nfse"` (dedicado, distingue de NF-e Focus). `status_sefaz="focusnfe"`. Prestador → `emit_*`; tomador → `dest_*`.
 - Novo `baixar_xml_nfse(url_xml)` (`providers/focusnfe_provider.py:901-1024`): baixa XML via URL fornecida pelo item. Padrão análogo ao `baixar_danfe` (302 → segundo GET sem Authorization).
 - `gov_fetch` loop pós-mapper dispatcheia por `tipo`. NFSe com `url_xml` presente e `status=1` promove `COMPLETO`; `status=2/3` (cancelada/substituida) **não** baixa. Cap `_XML_BATCH_CAP=25` compartilhado. Falha individual não derruba batch.
@@ -117,3 +117,17 @@ Limites preservados:
 - Mapper agora chama os helpers; `iss_retido` no doc virou `bool` (antes vinha string "False" truthy). Novos campos `item_lista_servico` e `codigo_cnae` emitidos no doc final.
 - 253/253 testes verdes (+21 novos: T1..T11 + variantes de normalização). `_mapear_nfe_focus` intocado (regressão T11). Zero HTTP real. Sem push/deploy.
 - Detalhes: `docs/adr/_handoff/2026-07-18-fix-nfse-focusnfe-servicos-lista.md`.
+
+## Fix — 2026-07-22 (NFSe FocusNFe · rota `nfsens_recebidas`)
+
+- Sintoma: MapOne chamava FiscalOne para `doc_type=nfse`, provider
+  `focusnfe`, ambiente produção, mas FiscalOne retornava
+  `FOCUS_HTTP_ERROR` por HTTP 404.
+- Causa: rota de listagem NFSe Nacional recebida estava como
+  `/v2/nfses_recebidas`; o endpoint correto usado pelo contrato atual é
+  `/v2/nfsens_recebidas`.
+- Fix: `FocusNFeProvider.gov_fetch(tipo="nfse")` usa
+  `/v2/nfsens_recebidas` mantendo `cnpj`, `versao` e `completa="1"`.
+- NF-e, manifestação de Ciência, ADN NFSe e emissão fiscal permanecem
+  intocados.
+- Detalhes: `docs/adr/_handoff/2026-07-22-fix-nfse-focusnfe-rota-nfsens.md`.

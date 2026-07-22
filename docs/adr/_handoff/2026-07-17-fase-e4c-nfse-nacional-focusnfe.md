@@ -2,7 +2,7 @@
 
 Data: 2026-07-17
 Base: ADR-0043 · Commit anterior: `43a9cf2` (E4a mapper NF-e).
-Discovery: relatório E4c (rota `/v2/nfses_recebidas`; schema `NfseRecebida`
+Discovery: relatório E4c (rota `/v2/nfsens_recebidas`; schema `NfseRecebida`
 confirmado na doc oficial FocusNFe).
 
 ## Objetivo
@@ -33,7 +33,7 @@ CT-e / MDF-e continuam bloqueados (delegar SEFAZ/outros).
 ### A1b · URL + `completa=1` (`focusnfe_provider.py:365-378`)
 
 - `tipo="nfe"` → `/v2/nfes_recebidas` (rota preservada).
-- `tipo="nfse"` → `/v2/nfses_recebidas` + `params["completa"]="1"`.
+- `tipo="nfse"` → `/v2/nfsens_recebidas` + `params["completa"]="1"`.
 
 Cursor `versao` incremental (X-Max-Version) reusado — comum aos dois.
 

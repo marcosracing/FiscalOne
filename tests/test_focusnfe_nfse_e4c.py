@@ -1,7 +1,7 @@
 """FocusNFe · Fase E4c — NFSe Nacional recebidas via FocusNFe.
 
 Cobre:
-  - `gov_fetch(tipo="nfse")` monta URL `/v2/nfses_recebidas` e envia
+  - `gov_fetch(tipo="nfse")` monta URL `/v2/nfsens_recebidas` e envia
     `params={cnpj, versao, completa="1"}`.
   - Mapper `_mapear_nfse_focus` converte prestador/tomador/servicos.
   - status=1/2/3 → cancelado/substituido corretos.
@@ -141,7 +141,7 @@ class TestMapperNfse:
 # ── gov_fetch — dispatch por tipo ───────────────────────────────────────────
 class TestGovFetchTipoNfse:
     @patch("providers.focusnfe_provider.requests.get")
-    def test_url_nfses_recebidas_com_completa_1(self, mock_get, provider_com_token):
+    def test_url_nfsens_recebidas_com_completa_1(self, mock_get, provider_com_token):
         mock_get.return_value = _mock_resp(
             status=200, headers={"X-Max-Version": "42", "X-Total-Count": "1"},
             json_data=[_item_nfse()])
@@ -150,7 +150,7 @@ class TestGovFetchTipoNfse:
             "fo-e4c")
         assert r["ok"] is True
         args, kwargs = mock_get.call_args
-        assert args[0].endswith("/v2/nfses_recebidas")
+        assert args[0].endswith("/v2/nfsens_recebidas")
         assert kwargs["params"]["cnpj"] == "07219398000109"
         assert kwargs["params"]["versao"] == "0"
         assert kwargs["params"]["completa"] == "1"
