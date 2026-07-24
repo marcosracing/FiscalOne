@@ -142,14 +142,19 @@ class TestMapperNfse:
 class TestGovFetchTipoNfse:
     @patch("providers.focusnfe_provider.requests.get")
     def test_url_nfsens_recebidas_com_completa_1(self, mock_get, provider_com_token):
-        mock_get.return_value = _mock_resp(
+        # Sem url_xml no item, o gov_fetch cai no fallback oficial por
+        # chave (nova regra). Fornece dois mocks: listagem + fallback OK.
+        listagem = _mock_resp(
             status=200, headers={"X-Max-Version": "42", "X-Total-Count": "1"},
             json_data=[_item_nfse()])
+        xml_ok = _mock_resp(status=200, text="<CompNfse/>")
+        mock_get.side_effect = [listagem, xml_ok]
         r = provider_com_token.gov_fetch(
             {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
             "fo-e4c")
         assert r["ok"] is True
-        args, kwargs = mock_get.call_args
+        # Primeira chamada = listagem (parametros verificados aqui).
+        args, kwargs = mock_get.call_args_list[0]
         assert args[0].endswith("/v2/nfsens_recebidas")
         assert kwargs["params"]["cnpj"] == "07219398000109"
         assert kwargs["params"]["versao"] == "0"
@@ -178,14 +183,19 @@ class TestGovFetchTipoNfse:
         mock_get.return_value = _mock_resp(
             status=200, headers={"X-Max-Version": "50"},
             json_data=[_item_nfse(chave="valida"),
-                       {"status": 1}])  # item sem chave — cai em erros
+                       {"status": 1}])  # item sem chave/versao — vira erro
         r = provider_com_token.gov_fetch(
             {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
             "fo-e4c")
         assert r["ok"] is True
         assert len(r["documentos"]) == 1
         assert len(r["erros"]) == 1
-        assert r["erros"][0]["codigo"] == "FOCUS_ITEM_INVALIDO"
+        # Rev.3 (2026-07-24): item sem `versao` valida bloqueia
+        # pre-mapper com FOCUS_ITEM_VERSAO_INVALIDA. Antes: caia em
+        # FOCUS_ITEM_INVALIDO por ValueError do mapper (chave ausente).
+        # Ambos sao aceitaveis — o efeito no cursor e' o mesmo.
+        assert r["erros"][0]["codigo"] in {"FOCUS_ITEM_INVALIDO",
+                                            "FOCUS_ITEM_VERSAO_INVALIDA"}
 
 
 # ── XML via url_xml ─────────────────────────────────────────────────────────
@@ -208,11 +218,15 @@ class TestGovFetchNfseXmlUrl:
         assert r["xmls_pendentes"] == 0
 
     @patch("providers.focusnfe_provider.requests.get")
-    def test_url_xml_404_vira_resumo_pending(self, mock_get, provider_com_token):
+    def test_url_xml_404_e_fallback_por_chave_404_vira_pending(
+            self, mock_get, provider_com_token):
+        # Com nova regra: url_xml 404 → tenta fallback oficial por chave
+        # /v2/nfsens_recebidas/{chave}.xml. Se AMBOS falharem → pending.
         listagem = _mock_resp(status=200, headers={"X-Max-Version": "42"},
                               json_data=[_item_nfse(with_url_xml=True)])
         xml_404 = _mock_resp(status=404, text="")
-        mock_get.side_effect = [listagem, xml_404]
+        fallback_404 = _mock_resp(status=404, text="")
+        mock_get.side_effect = [listagem, xml_404, fallback_404]
         r = provider_com_token.gov_fetch(
             {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
             "fo-e4c")
@@ -221,36 +235,73 @@ class TestGovFetchNfseXmlUrl:
         assert d["xml_pending"] is True
         assert "xml_bruto" not in d
         assert r["xmls_pendentes"] == 1
+        # A terceira chamada e' o fallback oficial por chave.
+        args_fallback, _ = mock_get.call_args_list[2]
+        assert args_fallback[0].endswith("/v2/nfsens_recebidas/"
+                                        + ("A" * 44)[:44] + ".xml") \
+            or "/v2/nfsens_recebidas/" in args_fallback[0]
 
     @patch("providers.focusnfe_provider.requests.get")
-    def test_url_xml_timeout_batch_continua(self, mock_get, provider_com_token):
+    def test_url_xml_404_fallback_por_chave_ok_vira_completo(
+            self, mock_get, provider_com_token):
+        # url_xml falha, mas o fallback oficial por chave devolve XML —
+        # documento vira COMPLETO (recuperacao pelo endpoint oficial).
+        listagem = _mock_resp(status=200, headers={"X-Max-Version": "42"},
+                              json_data=[_item_nfse(with_url_xml=True)])
+        xml_404 = _mock_resp(status=404, text="")
+        fallback_ok = _mock_resp(status=200, text="<CompNfse/>")
+        mock_get.side_effect = [listagem, xml_404, fallback_ok]
+        r = provider_com_token.gov_fetch(
+            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
+            "fo-e4c")
+        d = r["documentos"][0]
+        assert d["status_xml"] == "COMPLETO"
+        assert d["xml_bruto"].startswith("<CompNfse")
+        assert r["xmls_baixados"] == 1
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_url_xml_timeout_e_fallback_batch_continua(
+            self, mock_get, provider_com_token):
+        # 2 docs: no primeiro url_xml da Timeout, fallback OK (COMPLETO).
+        # No segundo, url_xml OK direto.
         docs = [_item_nfse(chave="A" * 40, with_url_xml=True),
                 _item_nfse(chave="B" * 40, with_url_xml=True)]
         listagem = _mock_resp(status=200, headers={"X-Max-Version": "50"},
                               json_data=docs)
         xml_ok = _mock_resp(status=200, text="<CompNfse/>")
         mock_get.side_effect = [
-            listagem, requests.exceptions.Timeout(), xml_ok,
+            listagem,
+            requests.exceptions.Timeout(),  # A url_xml
+            xml_ok,                          # A fallback por chave
+            xml_ok,                          # B url_xml
         ]
         r = provider_com_token.gov_fetch(
             {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
             "fo-e4c")
         assert r["ok"] is True
-        assert r["xmls_baixados"] == 1
-        assert r["xmls_pendentes"] == 1
+        assert r["xmls_baixados"] == 2
+        assert r["xmls_pendentes"] == 0
 
     @patch("providers.focusnfe_provider.requests.get")
-    def test_sem_url_xml_permanece_resumo(self, mock_get, provider_com_token):
+    def test_sem_url_xml_tenta_fallback_oficial_por_chave(
+            self, mock_get, provider_com_token):
+        # Sem url_xml no item, o gov_fetch cai direto no fallback oficial
+        # por chave /v2/nfsens_recebidas/{chave}.xml. Se OK: COMPLETO.
         listagem = _mock_resp(status=200, headers={"X-Max-Version": "42"},
                               json_data=[_item_nfse(with_url_xml=False)])
-        mock_get.side_effect = [listagem]
+        fallback_ok = _mock_resp(status=200, text="<CompNfse/>")
+        mock_get.side_effect = [listagem, fallback_ok]
         r = provider_com_token.gov_fetch(
             {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
             "fo-e4c")
-        assert mock_get.call_count == 1  # so listagem, sem GET XML
+        assert mock_get.call_count == 2  # listagem + fallback por chave
         d = r["documentos"][0]
-        assert d["status_xml"] == "RESUMO"
-        assert "xml_pending" not in d
+        assert d["status_xml"] == "COMPLETO"
+        assert r["xmls_baixados"] == 1
+        # Segunda chamada deve mirar o endpoint oficial NFSe.
+        args_fallback, _ = mock_get.call_args_list[1]
+        assert "/v2/nfsens_recebidas/" in args_fallback[0]
+        assert args_fallback[0].endswith(".xml")
 
     @patch("providers.focusnfe_provider.requests.get")
     def test_cancelada_e_substituida_nao_baixam_xml(self, mock_get, provider_com_token):

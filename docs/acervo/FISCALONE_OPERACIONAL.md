@@ -131,3 +131,93 @@ Limites preservados:
 - NF-e, manifestação de Ciência, ADN NFSe e emissão fiscal permanecem
   intocados.
 - Detalhes: `docs/adr/_handoff/2026-07-22-fix-nfse-focusnfe-rota-nfsens.md`.
+
+## Fix — 2026-07-24 (FocusNFe · paginacao segura e cursor v2)
+
+- Sintoma: MapOne perdia documentos NF-e/NFSe recebidos via FocusNFe
+  em lotes maiores que o cap (default 25). O cursor `X-Max-Version`
+  era propagado como `ultimo_nsu` mesmo com XMLs pendentes; a proxima
+  consulta pulava o pendente.
+- Causa 1: `gov_fetch` propagava `X-Max-Version` sem descontar itens
+  com `xml_pending=True` ou erro de mapper.
+- Causa 2: erros tecnicos FocusNFe (`FOCUS_TIMEOUT`,
+  `FOCUS_HTTP_ERROR`, etc) nao estavam em `_CODIGO_TECNICO_ERRO` do
+  classificador em `app.py` — caiam no fallback SEM_DOCUMENTO e o
+  consumidor avancava cursor apesar da falha.
+- Causa 3: NFSe dependia exclusivamente de `url_xml`; sem `url_xml`
+  ou com falha, o item ia para `xml_pending` mesmo com endpoint
+  oficial `/v2/nfsens_recebidas/{chave}.xml` disponivel.
+- Fix: `gov_fetch` calcula `cursor_seguro` que nunca ultrapassa a
+  menor versao com pendencia OU erro de mapper. Retorna tambem
+  `versao_entrada`, `versao_pagina`, `total_count`,
+  `quantidade_retornada`, `has_more`, `menor_versao_pendente_ou_erro`,
+  `xmls_baixados`, `xmls_pendentes`. `ultimo_nsu`/`max_nsu` legados
+  apontam para `cursor_seguro`.
+- Novo metodo `baixar_xml_nfse_por_chave(chave, ambiente)`: fallback
+  oficial via `GET /v2/nfsens_recebidas/{chave}.xml`. Comentario/
+  docstring que afirmava "nao pertence ao contrato oficial" foi
+  corrigido.
+- Mapper de erro preserva `versao` e `chave` (quando derivaveis do
+  item bruto), permitindo o cursor seguro travar exatamente antes do
+  gap.
+- Classificador `_classificar_acao_gov_fetch` (app.py) agora trata os
+  13 codigos FOCUS_* como `ERRO` (`nsu_avancou=False`).
+- Cap de XML (`FOCUSNFE_XML_BATCH_CAP`) segue como protecao
+  operacional, mas nao autoriza descarte — excedentes viram pendencia
+  e o cursor seguro fica na versao anterior.
+- NF-e e ADN NFSe intocados. Emissao fiscal intocada. Manifestacao
+  de Ciencia intocada.
+- 313/313 testes verdes (+18 novos em
+  `tests/test_focusnfe_safe_cursor.py`; +4 novos e 3 adaptados em
+  `tests/test_focusnfe_nfse_e4c.py` para o fallback oficial). Zero
+  chamada HTTP real. Zero token vazado.
+- Detalhes (MapOne):
+  `docs/adr/_handoff/2026-07-24-focusnfe-safe-cursor.md`.
+
+## Fix — 2026-07-24 rev.2 (correcao pos-revisao Codex)
+
+- **Defeito A** — mapper sem versao: `versoes_falha_local` ignorava
+  itens invalidos sem versao extraivel; cursor podia avancar. Fix:
+  novo `erros_sem_versao` + `gap_sem_versao=True` no envelope; quando
+  ativo, `cursor_seguro=versao_entrada`, `has_more=True`,
+  `nsu_avancou=False`. Prevalece sobre erros com versao.
+- **Sanitizacao de mensagem** — `erro` do item invalido nao contem
+  mais o texto arbitrario da excecao (`{exc}`). Agora: apenas
+  `"mapper falhou ({type(exc).__name__})"`.
+- **CNPJ real** — removidos dos testes novos e substituidos por
+  sinteticos reservados. Novo teste
+  `test_cnpj_real_removido_dos_novos_testes` bloqueia reintroducao.
+- 317/317 testes verdes (+4 novos em
+  `tests/test_focusnfe_safe_cursor.py`). Zero HTTP real. Zero token
+  ou CNPJ real vazado.
+- Detalhes (MapOne):
+  `docs/adr/_handoff/2026-07-24-focusnfe-safe-cursor.md`.
+
+## Fix — 2026-07-24 rev.3 (bloqueador final · validacao estrita de versao)
+
+- **Defeito:** mappers NF-e/NFS-e normalizavam `versao` invalida para
+  `0` e devolviam documento aparentemente valido; cursor podia
+  avancar ate `X-Max-Version`.
+- **Fix:** novo helper `_versao_focus_valida(raw)` — aceita apenas
+  `int > 0` (nao bool) ou `str` puramente numerica com valor `> 0`.
+  Bail-out **pre-mapper** em `gov_fetch` quando versao bruta e'
+  invalida: item vira `FOCUS_ITEM_VERSAO_INVALIDA`, nao entra em
+  `documentos[]`, nao dispara GET individual de XML, contribui para
+  `gap_sem_versao=True` e trava `cursor_seguro` em `versao_entrada`.
+  Validacao pos-mapper mantida como rede de seguranca.
+- **Definicao de versao FocusNFe valida:** inteiro (nao bool) > 0
+  ou string puramente numerica (`.isdigit()`) com valor > 0 apos
+  `strip()`. Rejeita `None`, `""`, `0`, `"0"`, negativos, bool,
+  float/decimal, texto nao conversivel, lista, dict, tuple.
+- **Codigo canonico:** `FOCUS_ITEM_VERSAO_INVALIDA` (novo). Mensagem
+  sanitizada `"item com versao FocusNFe invalida"` — sem valor bruto.
+  `FOCUS_ITEM_INVALIDO` (excecao pos-mapper) permanece valido.
+- **Recuperacao operacional:** a proxima consulta com `versao=
+  cursor_seguro` (= `versao_entrada`) devolve os mesmos itens; se o
+  Focus corrigir o item, ele passa a ser contabilizado.
+- 382/382 testes verdes (+65 vs. rev.2). Zero HTTP real. Zero CNPJ
+  real, XML real, chave real ou token vazado.
+- MapOne intocado nesta rev.3 (o consumo de `gap_sem_versao` ja foi
+  implementado na rev.2 e continua correto).
+- Detalhes (MapOne):
+  `docs/adr/_handoff/2026-07-24-focusnfe-safe-cursor.md`.

@@ -98,6 +98,14 @@ _CODIGO_TECNICO_ERRO = {
     "CERT_SEM_CNPJ", "CERT_FONTE_NAO_SUPORTADA",
     "PAYLOAD_INVALIDO", "CNPJ_INVALIDO", "TIPO_NAO_SUPORTADO",
     "PROVIDER_NAO_IMPLEMENTADO", "CNPJ_INVALIDO",
+    # FocusNFe — erros tecnicos/upstream. NUNCA podem virar SEM_DOCUMENTO
+    # (o classificador antes caia no fallback e retornava SEM_DOCUMENTO,
+    # o que fazia `nsu_avancou=True` e ultrapassava versoes sem persistir).
+    "FOCUS_TIMEOUT", "FOCUS_UNAVAILABLE", "FOCUS_HTTP_ERROR",
+    "FOCUS_BAD_REQUEST", "FOCUS_AUTH_ERROR", "FOCUS_FORBIDDEN",
+    "FOCUS_RATE_LIMIT", "FOCUS_SERVER_ERROR", "FOCUS_PARSE_ERROR",
+    "FOCUS_SCHEMA_ERROR", "FOCUS_TOKEN_AUSENTE",
+    "FOCUS_NFSE_NAO_HABILITADA", "FOCUS_TIPO_NAO_SUPORTADO",
 }
 
 
@@ -646,6 +654,21 @@ def gov_fetch():
         "ambiente":                 (payload.get("ambiente") or "homologacao").lower(),
         "tipo":                     tipo,
         "data_inicio":              payload.get("data_inicio") or result.get("data_inicio"),
+        # Contrato v2 (safe cursor FocusNFe) — MapOne usa para gap-aware
+        # advance. `cursor_seguro` NUNCA ultrapassa a menor versao pendente
+        # ou com erro; `has_more` indica se ha proxima pagina/pendencias a
+        # drenar; `menor_versao_pendente_ou_erro` marca o gap.
+        "versao_entrada":                result.get("versao_entrada"),
+        "versao_pagina":                 result.get("versao_pagina"),
+        "quantidade_retornada":          result.get("quantidade_retornada"),
+        "has_more":                      result.get("has_more"),
+        "menor_versao_pendente_ou_erro": result.get("menor_versao_pendente_ou_erro"),
+        "cursor_seguro":                 result.get("cursor_seguro"),
+        "gap_sem_versao":                result.get("gap_sem_versao"),
+        "erros_sem_versao":              result.get("erros_sem_versao"),
+        "total_count":                   result.get("total_count"),
+        "xmls_baixados":                 result.get("xmls_baixados"),
+        "xmls_pendentes":                result.get("xmls_pendentes"),
     }
     _ARRAY_KEYS = ("documentos", "resumos", "erros", "results")
     envelope = {k: v for k, v in envelope.items() if v is not None or k in _ARRAY_KEYS or k == "ok"}

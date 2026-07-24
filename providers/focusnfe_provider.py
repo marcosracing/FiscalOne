@@ -164,6 +164,42 @@ except (TypeError, ValueError):
     _XML_BATCH_CAP = 25
 
 
+# ── Validacao estrita de `versao` FocusNFe (rev.3, 2026-07-24) ────────
+# Cursor FocusNFe e' `versao` (inteiro monotonico). Item cuja versao nao
+# possa ser confirmada como inteiro positivo NAO pode ser contabilizado
+# — o cursor seguro nao pode ultrapassa-lo. Esta funcao e' o unico
+# ponto autorizado a decidir "versao valida".
+#
+# Aceita apenas:
+#   - int > 0 (nao bool);
+#   - str contendo somente digitos, com valor > 0 apos strip.
+# Rejeita:
+#   - None, chave ausente, "", "0", 0, negativos, bool, decimal,
+#     float, texto nao conversivel, lista, dict.
+# Nao inventa valor. Nao deriva de indice/X-Max-Version/chave.
+def _versao_focus_valida(raw: Any) -> int | None:
+    """Retorna a versao FocusNFe (int > 0) apenas quando ela puder ser
+    confirmada com seguranca. Qualquer input ambiguo devolve `None`."""
+    if raw is None:
+        return None
+    # `bool` e' subclasse de `int` — bloqueia antes do isinstance(int).
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw if raw > 0 else None
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s or not s.isdigit():
+            return None
+        try:
+            n = int(s)
+        except (TypeError, ValueError):
+            return None
+        return n if n > 0 else None
+    # float/decimal/list/dict/tuple/set/etc.
+    return None
+
+
 # ── Stub legado (usado pelos metodos ainda nao implementados HTTP) ────────────
 _STUB = {
     "ok":       False,
@@ -761,35 +797,116 @@ class FocusNFeProvider(GovProvider):
         # Dispatch por tipo: NF-e usa `_mapear_nfe_focus`, NFSe usa
         # `_mapear_nfse_focus` (contrato distinto — sem cStat SEFAZ, sem
         # DV DFe 44, prestador/tomador em vez de emit/dest classicos).
+        # Erro de mapper NAO derruba batch; preserva `versao`/`chave` extraidas
+        # pre-mapper para permitir que o consumidor bloqueie o cursor antes do
+        # gap. Sem `versao`, o consumidor deve tratar como pendencia da pagina.
         mapper = _mapear_nfse_focus if tipo == "nfse" else _mapear_nfe_focus
         documentos: list[dict] = []
         erros: list[dict] = []
         max_versao_itens = 0
+        # `erros_sem_versao` conta itens que falharam no mapper SEM que a
+        # versao FocusNFe pudesse ser extraida do payload bruto. Sem
+        # versao, o cursor nao pode ser bloqueado com precisao — a unica
+        # opcao segura e' NAO avancar o cursor nesta pagina inteira.
+        # Ver bloco de cursor abaixo (gap_sem_versao).
+        erros_sem_versao = 0
         for idx, item in enumerate(body):
+            # Pre-mapper: extrai `versao_pre` estrita pelo helper
+            # canonico (aceita apenas int/str-digit > 0). Serve tambem
+            # como fallback quando o mapper levantar excecao.
+            versao_pre: int | None = None
+            chave_pre: str | None = None
+            if isinstance(item, dict):
+                versao_pre = _versao_focus_valida(
+                    item.get("versao") if item.get("versao") is not None
+                    else item.get("versao_nfe")
+                )
+                chave_pre = _get_str(
+                    item, "chave_nfe", "chave", "chNFe", "chave_nfse",
+                ) or None
+
+            # Bail-out pre-mapper (rev.3): quando a versao bruta e'
+            # invalida (ausente, 0, negativa, bool, decimal, lista,
+            # dict, texto etc), NAO chama o mapper — os mappers NF-e/
+            # NFS-e normalizam silenciosamente para 0/1 e devolvem doc
+            # "valido", mascarando o gap. Aqui bloqueamos antes disso.
+            # A unica ressalva: se `versao_pre is None` mas o mapper
+            # SUCEDER com uma versao valida (contratos futuros?), o
+            # post-mapper permite. Hoje isso nao ocorre.
+            if isinstance(item, dict) and versao_pre is None:
+                entry: dict[str, Any] = {
+                    "ok":         False,
+                    "codigo":     "FOCUS_ITEM_VERSAO_INVALIDA",
+                    "erro":       "item com versao FocusNFe invalida",
+                    "indice":     idx,
+                    "provider":   "focusnfe",
+                    "sem_versao": True,
+                }
+                if chave_pre:
+                    entry["chave"] = chave_pre
+                erros.append(entry)
+                erros_sem_versao += 1
+                continue
+
             try:
                 doc = mapper(item, trace_id)
             except Exception as exc:
-                erros.append({
+                # Mensagem SANITIZADA — apenas o nome da excecao. O texto
+                # arbitrario de exc pode conter payload fiscal (CNPJ,
+                # chave, valor) ou pedaco do dict Focus; nunca deve
+                # retornar ao consumidor. `indice` e' posicional, seguro.
+                entry: dict[str, Any] = {
                     "ok":       False,
                     "codigo":   "FOCUS_ITEM_INVALIDO",
-                    "erro":     f"{type(exc).__name__}: {exc}",
+                    "erro":     f"mapper falhou ({type(exc).__name__})",
                     "indice":   idx,
                     "provider": "focusnfe",
+                }
+                if versao_pre is not None:
+                    entry["versao"] = versao_pre
+                else:
+                    # Marca explicitamente no proprio item de erro para o
+                    # consumidor saber que este item nao contribui para
+                    # `menor_versao_pendente_ou_erro` — o cursor precisa
+                    # ficar em `versao_entrada` para nao ultrapassa-lo.
+                    entry["sem_versao"] = True
+                    erros_sem_versao += 1
+                if chave_pre:
+                    entry["chave"] = chave_pre
+                erros.append(entry)
+                continue
+
+            # Pos-mapper (rev.3, 2026-07-24): valida versao devolvida.
+            # Os mappers NF-e/NFS-e normalizam versao ausente/invalida
+            # para 0 (por retrocompatibilidade com contratos antigos).
+            # Zero e' invalido — item nao pode ser contabilizado, nao
+            # pode entrar em `documentos[]`, nao pode ter XML baixado
+            # e forca `gap_sem_versao=True` para bloquear o cursor.
+            v_ok = _versao_focus_valida(doc.get("versao"))
+            if v_ok is None:
+                erros.append({
+                    "ok":         False,
+                    "codigo":     "FOCUS_ITEM_VERSAO_INVALIDA",
+                    "erro":       "item com versao FocusNFe invalida",
+                    "indice":     idx,
+                    "provider":   "focusnfe",
+                    "sem_versao": True,
                 })
+                erros_sem_versao += 1
                 continue
             documentos.append(doc)
-            v = int(doc.get("versao") or 0)
-            if v > max_versao_itens:
-                max_versao_itens = v
+            if v_ok > max_versao_itens:
+                max_versao_itens = v_ok
 
         # ── XML completo por chave / url_xml (Fase E4a + E4c) ────────────
-        # NF-e (E4a): busca XML por chave via GET /nfes_recebidas/{chave}.xml
+        # NF-e (E4a): busca XML por chave via GET /v2/nfes_recebidas/{chave}.xml
         #             quando `nfe_completa=True`.
-        # NFSe (E4c): busca XML via URL fornecida em `url_xml` (a rota
-        #             `/nfses_recebidas/{chave}.xml` NAO faz parte do
-        #             contrato oficial). Falha individual nunca derruba
-        #             batch — vira RESUMO + xml_pending.
-        # Nota CANCELADA (NF-e) nao baixa XML nesta fase — E4b.
+        # NFSe: busca XML via `url_xml` do payload; se ausente ou falhar,
+        #       cai para o endpoint oficial GET /v2/nfsens_recebidas/{chave}.xml
+        #       (contrato oficial FocusNFe). Falha individual nunca derruba
+        #       batch — vira RESUMO + xml_pending, preservando `versao` para
+        #       o consumidor bloquear o cursor antes do gap.
+        # CANCELADA (NF-e) nao baixa XML nesta fase — E4b.
         # NFSe status 2/3 (cancelada/substituida) tambem nao baixa —
         # substituicao/cancelamento demandam evento separado (fora do E4c).
         xml_baixados = 0
@@ -800,23 +917,38 @@ class FocusNFeProvider(GovProvider):
             if doc.get("substituido") == 1:
                 continue
             if tipo == "nfse":
-                # NFSe: url_xml opcional; sem url → RESUMO permanente.
                 url_xml = doc.get("url_xml")
-                if not url_xml:
-                    continue
-                if xml_baixados >= _XML_BATCH_CAP:
-                    doc["xml_pending"] = True
-                    xml_pendentes += 1
-                    continue
-                res = self.baixar_xml_nfse(url_xml)
-                if res.get("ok"):
-                    doc["xml_bruto"]       = res["xml_bruto"]
-                    doc["xml_hash_sha256"] = res["xml_hash_sha256"]
-                    doc["status_xml"]      = "COMPLETO"
-                    xml_baixados += 1
-                else:
-                    doc["xml_pending"] = True
-                    xml_pendentes += 1
+                chave_nfse = doc.get("chave") or doc.get("chNFe")
+                # 1) url_xml quando presente. Cap decidido antes de qualquer HTTP.
+                if url_xml:
+                    if xml_baixados >= _XML_BATCH_CAP:
+                        doc["xml_pending"] = True
+                        xml_pendentes += 1
+                        continue
+                    res = self.baixar_xml_nfse(url_xml)
+                    if res.get("ok"):
+                        doc["xml_bruto"]       = res["xml_bruto"]
+                        doc["xml_hash_sha256"] = res["xml_hash_sha256"]
+                        doc["status_xml"]      = "COMPLETO"
+                        xml_baixados += 1
+                        continue
+                # 2) Fallback oficial: /v2/nfsens_recebidas/{chave}.xml.
+                if chave_nfse:
+                    if xml_baixados >= _XML_BATCH_CAP:
+                        doc["xml_pending"] = True
+                        xml_pendentes += 1
+                        continue
+                    res = self.baixar_xml_nfse_por_chave(chave_nfse, ambiente)
+                    if res.get("ok"):
+                        doc["xml_bruto"]       = res["xml_bruto"]
+                        doc["xml_hash_sha256"] = res["xml_hash_sha256"]
+                        doc["status_xml"]      = "COMPLETO"
+                        xml_baixados += 1
+                        continue
+                # Nada baixado — vira pendencia. O consumidor deve bloquear
+                # o cursor antes desta versao ate a reconsulta.
+                doc["xml_pending"] = True
+                xml_pendentes += 1
                 continue
             # NF-e (fluxo E4a existente)
             if not doc.get("nfe_completa"):
@@ -836,14 +968,86 @@ class FocusNFeProvider(GovProvider):
                 doc["xml_pending"] = True
                 xml_pendentes += 1
 
-        # ── Cursor ────────────────────────────────────────────────────────
+        # ── Cursor seguro (versao) ───────────────────────────────────────
+        # X-Max-Version e X-Total-Count sao os headers oficiais FocusNFe.
+        # X-Max-Version = maior versao contida na pagina (limite da pagina),
+        # NAO autorizacao para confirmar persistencia. O cursor seguro nunca
+        # pode ultrapassar a menor versao com pendencia (XML nao baixado)
+        # ou com erro de mapper — se ultrapassar, na proxima consulta o
+        # FocusNFe nao devolve o item e o documento vira perda logica.
         max_version_hdr = resp.headers.get("X-Max-Version")
         if max_version_hdr:
-            ultimo_nsu = str(max_version_hdr).strip()
+            try:
+                versao_pagina_int = int(str(max_version_hdr).strip())
+            except (TypeError, ValueError):
+                versao_pagina_int = max_versao_itens or 0
         elif max_versao_itens > 0:
-            ultimo_nsu = str(max_versao_itens)
+            versao_pagina_int = max_versao_itens
         else:
-            ultimo_nsu = versao_entrada
+            try:
+                versao_pagina_int = int(versao_entrada)
+            except (TypeError, ValueError):
+                versao_pagina_int = 0
+
+        try:
+            versao_entrada_int = int(versao_entrada)
+        except (TypeError, ValueError):
+            versao_entrada_int = 0
+
+        # Menor versao pendente ou com erro (bloqueia cursor).
+        pendentes_versoes: list[int] = []
+        for d in documentos:
+            if d.get("xml_pending"):
+                try:
+                    pendentes_versoes.append(int(d.get("versao") or 0))
+                except (TypeError, ValueError):
+                    pass
+        for e in erros:
+            v = e.get("versao")
+            if v is None:
+                continue
+            try:
+                pendentes_versoes.append(int(v))
+            except (TypeError, ValueError):
+                pass
+        pendentes_versoes = [v for v in pendentes_versoes if v > 0]
+        menor_versao_pendente = min(pendentes_versoes) if pendentes_versoes else None
+
+        # Gap sem versao — se houve erro de mapper sem versao extraivel, a
+        # unica opcao segura e' NAO avancar o cursor NESTA pagina. Nao ha
+        # como bloquear "antes do item" quando nao sabemos a versao dele;
+        # invencionar versao seria criar cursor falso. `gap_sem_versao`
+        # trava tudo em `versao_entrada` e forca reconsulta.
+        gap_sem_versao = erros_sem_versao > 0
+
+        # Cursor seguro:
+        #   1. gap_sem_versao → versao_entrada (bloqueio total);
+        #   2. menor pendente/erro com versao → min(versao_pagina, menor-1);
+        #   3. sem pendencia → versao_pagina.
+        # Nunca regride abaixo de `versao_entrada`; nunca ultrapassa
+        # `versao_pagina_int`.
+        if gap_sem_versao:
+            cursor_seguro_int = versao_entrada_int
+        elif menor_versao_pendente is not None:
+            cursor_seguro_int = max(
+                versao_entrada_int,
+                min(versao_pagina_int, menor_versao_pendente - 1),
+            )
+        else:
+            cursor_seguro_int = max(versao_entrada_int, versao_pagina_int)
+
+        cursor_seguro = str(cursor_seguro_int)
+
+        # has_more: pagina cheia (>=100 é o teto oficial FocusNFe) sugere
+        # proxima pagina; pendencias/erros/gap_sem_versao forcam reconsulta.
+        quantidade_retornada = len(body)
+        has_more = (
+            quantidade_retornada >= 100
+            or xml_pendentes > 0
+            or bool(erros)
+            or gap_sem_versao
+            or (total_count > quantidade_retornada)
+        )
 
         return {
             "ok":              True,
@@ -852,13 +1056,33 @@ class FocusNFeProvider(GovProvider):
             "documentos":      documentos,
             "resumos":         [],
             "erros":           erros,
-            "ultimo_nsu":      ultimo_nsu,
-            "max_nsu":         ultimo_nsu,
+            # Cursores legados apontam para o cursor seguro — consumidores
+            # antigos que leem `ultimo_nsu`/`max_nsu` ficam automaticamente
+            # protegidos contra ultrapassar pendencias.
+            "ultimo_nsu":      cursor_seguro,
+            "max_nsu":         cursor_seguro,
             "cursor_tipo":     "versao",
-            "nsu_avancou":     ultimo_nsu != versao_entrada,
+            "nsu_avancou":     cursor_seguro != versao_entrada,
+            # Contrato v2 — cursor seguro explicito.
+            "versao_entrada":                versao_entrada,
+            "versao_pagina":                 str(versao_pagina_int),
+            "quantidade_retornada":          quantidade_retornada,
+            "has_more":                      has_more,
+            "menor_versao_pendente_ou_erro": (
+                str(menor_versao_pendente) if menor_versao_pendente is not None else None
+            ),
+            "cursor_seguro":                 cursor_seguro,
+            # `gap_sem_versao=True` quando existe pelo menos um item
+            # invalido cuja versao FocusNFe nao pode ser extraida do
+            # payload. Nesse caso o cursor NAO pode avancar: nao ha
+            # como bloquear "antes do item" sem inventar versao. O
+            # consumidor deve tratar como GAP_SEM_VERSAO (nunca
+            # BACKLOG_ZERADO nem REJEITADO).
+            "gap_sem_versao":                gap_sem_versao,
+            "erros_sem_versao":              erros_sem_versao,
+            # Compat / telemetria.
             "total_count":     total_count,
             "http_status":     200,
-            # Fase E4a — telemetria de batch XML.
             "xmls_baixados":   xml_baixados,
             "xmls_pendentes":  xml_pendentes,
         }
@@ -1154,6 +1378,130 @@ class FocusNFeProvider(GovProvider):
                 "provider":    "focusnfe",
                 "codigo":      "FOCUS_XML_NAO_ENCONTRADO",
                 "erro":        "XML NFSe nao encontrado (404).",
+                "http_status": 404,
+            }
+        elif resp.status_code != 200:
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "FOCUS_XML_HTTP_ERROR",
+                "erro":        f"Status HTTP inesperado ({resp.status_code}).",
+                "http_status": resp.status_code,
+            }
+        else:
+            body = resp.text or ""
+
+        if not body:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_XML_VAZIO",
+                "erro":     "Corpo XML vazio.",
+            }
+        sha256 = hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()
+        return {
+            "ok":              True,
+            "provider":        "focusnfe",
+            "xml_bruto":       body,
+            "xml_hash_sha256": sha256,
+            "tamanho":         len(body),
+        }
+
+    # ── baixar_xml_nfse_por_chave — endpoint OFICIAL NFSe por chave ────
+    def baixar_xml_nfse_por_chave(self, chave: str,
+                                   ambiente: str | None = None) -> dict:
+        """Baixa XML NFSe Nacional pelo endpoint oficial FocusNFe por chave.
+
+        Endpoint: GET {base_url}/v2/nfsens_recebidas/{chave}.xml
+        Headers:  Authorization Basic + Accept: application/xml
+
+        Padrao oficial FocusNFe (doc `nfsen-recebidas`). Usado como
+        fallback pelo `gov_fetch` quando `url_xml` do item nao esta
+        presente ou falha. Timeout curto (min(self._timeout, 5)) para
+        nao travar batch. Redirect 3xx trata igual `baixar_xml_nfse`:
+        o segundo GET nao envia Authorization (URL pre-assinada).
+
+        Retorno OK:  {ok, provider, xml_bruto, xml_hash_sha256, tamanho}
+        Retorno erro:{ok:False, provider, codigo, erro} — token nao vaza.
+        """
+        chave_s = str(chave or "").strip()
+        if not chave_s:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_BAD_REQUEST",
+                "erro":     "chave obrigatoria.",
+            }
+        try:
+            token = self._require_token()
+        except RuntimeError as exc:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_TOKEN_AUSENTE",
+                "erro":     str(exc),
+            }
+        base_url = self._base_url_for(ambiente)
+        url = f"{base_url}/v2/nfsens_recebidas/{chave_s}.xml"
+        headers_auth = {**_basic_auth_header(token), "Accept": "application/xml"}
+        timeout_xml = min(self._timeout, 5) if self._timeout else 5
+        try:
+            resp = requests.get(url, headers=headers_auth,
+                                allow_redirects=False, timeout=timeout_xml)
+        except requests.exceptions.Timeout:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_XML_TIMEOUT",
+                "erro":     f"Timeout ({timeout_xml}s) baixando XML NFSe.",
+            }
+        except requests.exceptions.RequestException as exc:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_XML_ERRO",
+                "erro":     f"Erro HTTP: {type(exc).__name__}.",
+            }
+        finally:
+            del token
+            del headers_auth
+
+        # Redirect: URL pre-assinada — segundo GET SEM Authorization.
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = resp.headers.get("Location", "").strip()
+            if not location:
+                return {
+                    "ok":       False,
+                    "provider": "focusnfe",
+                    "codigo":   "FOCUS_XML_NO_LOCATION",
+                    "erro":     f"Redirect {resp.status_code} sem Location.",
+                }
+            try:
+                resp2 = requests.get(location,
+                                     headers={"Accept": "application/xml"},
+                                     allow_redirects=False, timeout=timeout_xml)
+            except requests.exceptions.RequestException as exc:
+                return {
+                    "ok":       False,
+                    "provider": "focusnfe",
+                    "codigo":   "FOCUS_XML_ERRO",
+                    "erro":     f"Erro download pre-assinado: {type(exc).__name__}.",
+                }
+            if resp2.status_code != 200:
+                return {
+                    "ok":          False,
+                    "provider":    "focusnfe",
+                    "codigo":      "FOCUS_XML_HTTP_ERROR",
+                    "erro":        f"Storage devolveu {resp2.status_code}.",
+                    "http_status": resp2.status_code,
+                }
+            body = resp2.text or ""
+        elif resp.status_code == 404:
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "FOCUS_XML_NAO_ENCONTRADO",
+                "erro":        "XML NFSe nao encontrado no FocusNFe (404).",
                 "http_status": 404,
             }
         elif resp.status_code != 200:
