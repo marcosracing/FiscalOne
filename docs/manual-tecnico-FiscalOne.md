@@ -1049,3 +1049,16 @@ G0.2a: **433/433** verdes na suíte completa (baseline 382 + 51 novos).
 - "XML chega após ciência" permanece **INFERÊNCIA** — não fato — sobre
   o comportamento da FocusNFe/SEFAZ, herdado do Discovery G0.2 anterior.
 - **G0.2b não iniciado.**
+
+### Retificação G0.2a-R1 — redirect e ambiente (2026-07-28)
+
+- Redirect de XML somente é seguido por HTTPS, sem credencial embutida,
+  fragmento ou porta não padrão, e para o host original ou host nominalmente
+  autorizado em `FISCALONE_XML_REDIRECT_HOSTS` (lista separada por vírgulas).
+- Redirect cross-host sem allowlist falha fechado com
+  `FOCUS_XML_REDIRECT_NAO_PERMITIDO`; o segundo GET permanece sem
+  `Authorization`.
+- `ambiente` ausente ou fora de `producao|homologacao` retorna
+  `HTTP 400 · AMBIENTE_INVALIDO`; não existe fallback silencioso.
+- Antes de futura adoção/deploy, os hosts reais de storage retornados pela
+  FocusNFe devem ser medidos e provisionados nominalmente na allowlist.

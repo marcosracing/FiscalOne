@@ -880,7 +880,7 @@ def xml_por_chave():
     doc_type      = str(payload.get("doc_type") or "").strip().lower()
     identificador = str(payload.get("identificador") or "").strip()
     provider_p    = str(payload.get("provider") or "").strip().lower()
-    ambiente      = str(payload.get("ambiente") or "").strip().lower() or "homologacao"
+    ambiente      = str(payload.get("ambiente") or "").strip().lower()
 
     # 4) doc_type
     if doc_type not in ("nfe", "nfse", "cte"):
@@ -954,9 +954,14 @@ def xml_por_chave():
             "erro":     "provider nao suportado.",
         }), 400
 
-    # 7) Ambiente
+    # 7) Ambiente — contrato enumerado; nunca corrigir entrada invalida.
     if ambiente not in ("producao", "homologacao"):
-        ambiente = "homologacao"
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "AMBIENTE_INVALIDO",
+            "erro":     "ambiente obrigatorio: 'producao' ou 'homologacao'.",
+        }), 400
 
     # 8) Execucao — provider FocusNFe recupera bytes brutos.
     try:

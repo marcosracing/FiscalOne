@@ -210,7 +210,9 @@ class TestProviderBytesPorChave:
 
     # 11. Helper com redirect: segundo GET SEM Authorization
     @patch("providers.focusnfe_provider.requests.get")
-    def test_redirect_nunca_envia_auth_no_segundo_get(self, mock_get, provider):
+    def test_redirect_nunca_envia_auth_no_segundo_get(self, mock_get, provider,
+                                                       monkeypatch):
+        monkeypatch.setenv("FISCALONE_XML_REDIRECT_HOSTS", "presigned")
         resp1 = _mock_resp(status=302, headers={"Location": "https://presigned/x.xml"})
         resp2 = _mock_resp(status=200, content=b"<CompNfse/>")
         mock_get.side_effect = [resp1, resp2]
@@ -222,6 +224,49 @@ class TestProviderBytesPorChave:
         primeiro, segundo = mock_get.call_args_list[0], mock_get.call_args_list[1]
         assert "Authorization" in primeiro.kwargs["headers"]
         assert "Authorization" not in segundo.kwargs["headers"]
+
+    @pytest.mark.parametrize("location", [
+        "http://storage.example/x.xml",
+        "https://usuario:senha@storage.example/x.xml",
+        "https://storage.example:8443/x.xml",
+        "https://storage.example/x.xml#fragmento",
+        "https://nao-autorizado.example/x.xml",
+        "/x.xml",
+    ])
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_redirect_inseguro_ou_nao_autorizado_falha_fechado(
+            self, mock_get, location, provider):
+        mock_get.return_value = _mock_resp(
+            status=302, headers={"Location": location})
+        r = provider._http_get_xml_bytes_upstream(
+            "https://api.focusnfe.com.br/v2/teste.xml",
+            permitir_redirect=True,
+        )
+        assert r["ok"] is False
+        assert r["codigo"] == "FOCUS_XML_REDIRECT_NAO_PERMITIDO"
+        assert mock_get.call_count == 1
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_redirect_mesmo_host_https_e_permitido_sem_allowlist(
+            self, mock_get, provider, monkeypatch):
+        monkeypatch.delenv("FISCALONE_XML_REDIRECT_HOSTS", raising=False)
+        mock_get.side_effect = [
+            _mock_resp(
+                status=302,
+                headers={
+                    "Location":
+                    "https://api.focusnfe.com.br/storage/x.xml?assinatura=abc"
+                },
+            ),
+            _mock_resp(status=200, content=b"<xml/>"),
+        ]
+        r = provider._http_get_xml_bytes_upstream(
+            "https://api.focusnfe.com.br/v2/teste.xml",
+            permitir_redirect=True,
+        )
+        assert r["ok"] is True
+        assert mock_get.call_count == 2
+        assert "Authorization" not in mock_get.call_args_list[1].kwargs["headers"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -290,6 +335,16 @@ class TestRotaXmlPorChave:
         assert r.headers["X-RLogix-Upstream-Status"] == "200"
         assert r.headers["X-RLogix-Content-SHA256"] == hashlib.sha256(xml).hexdigest()
         assert r.headers["Content-Length"] == str(len(xml))
+
+    @pytest.mark.parametrize("ambiente", ["", "staging", "PROD", "teste"])
+    def test_ambiente_ausente_ou_invalido_e_rejeitado(
+            self, client, ambiente):
+        body = _body_focus("nfe", CHAVE_NFE_OK, ambiente=ambiente)
+        with patch("app.get_provider") as get_provider:
+            r = _post_por_chave(client, body)
+        assert r.status_code == 400
+        assert r.get_json()["codigo"] == "AMBIENTE_INVALIDO"
+        get_provider.assert_not_called()
 
     # 16. CT-e valida → body identico
     @patch("providers.focusnfe_provider.requests.get")

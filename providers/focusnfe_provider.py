@@ -23,6 +23,7 @@ import base64
 import hashlib
 import json
 import os
+import urllib.parse
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -64,6 +65,34 @@ _FOCUSNFE_HOSTS = {
     "producao":     "https://api.focusnfe.com.br",
     "homologacao":  "https://homologacao.focusnfe.com.br",
 }
+
+_XML_REDIRECT_HOSTS_ENV = "FISCALONE_XML_REDIRECT_HOSTS"
+
+
+def _xml_redirect_location_permitida(location: str, original_url: str) -> bool:
+    """Valida redirect HTTPS contra allowlist nominal de hosts."""
+    try:
+        destino = urllib.parse.urlsplit(location)
+        origem = urllib.parse.urlsplit(original_url)
+        porta = destino.port
+    except (TypeError, ValueError):
+        return False
+    if (
+        destino.scheme.lower() != "https"
+        or not destino.hostname
+        or destino.username is not None
+        or destino.password is not None
+        or destino.fragment
+        or porta not in (None, 443)
+    ):
+        return False
+    permitidos = {str(origem.hostname or "").lower()}
+    permitidos.update(
+        host.strip().lower()
+        for host in os.environ.get(_XML_REDIRECT_HOSTS_ENV, "").split(",")
+        if host.strip()
+    )
+    return destino.hostname.lower() in permitidos
 
 
 def _normalizar_base_url(base_url: str) -> str:
@@ -1270,12 +1299,12 @@ class FocusNFeProvider(GovProvider):
         # Redirect (opt-in) — segundo GET SEM Authorization
         if permitir_redirect and status in (301, 302, 303, 307, 308):
             location = (resp.headers.get("Location") or "").strip()
-            if not location:
+            if not location or not _xml_redirect_location_permitida(location, url):
                 return {
                     "ok":          False,
                     "provider":    "focusnfe",
-                    "codigo":      "FOCUS_XML_NO_LOCATION",
-                    "erro":        f"Redirect {status} sem Location.",
+                    "codigo":      "FOCUS_XML_REDIRECT_NAO_PERMITIDO",
+                    "erro":        "Redirect upstream ausente ou nao permitido.",
                     "http_status": status,
                 }
             try:

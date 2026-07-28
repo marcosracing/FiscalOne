@@ -31,6 +31,7 @@ from providers.focusnfe_provider import (
 def provider_com_token(monkeypatch):
     monkeypatch.setenv("FOCUSNFE_TOKEN", "abcdef123456")
     monkeypatch.setenv("FOCUSNFE_TIMEOUT", "10")
+    monkeypatch.setenv("FISCALONE_XML_REDIRECT_HOSTS", "presigned")
     monkeypatch.delenv("FOCUSNFE_BASE_URL", raising=False)
     return FocusNFeProvider()
 
