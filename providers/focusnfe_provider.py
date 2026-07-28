@@ -57,6 +57,22 @@ def _basic_auth_header(token: str) -> dict:
     return {"Authorization": f"Basic {credencial}"}
 
 
+def _parse_retry_after_int(raw: object) -> int | None:
+    """Normaliza header Retry-After somente quando for inteiro positivo.
+
+    G0.2a-R2: nao interpreta data HTTP (RFC 7231); header cru nunca e
+    repassado ao cliente. Retorna None se ausente/negativo/nao-inteiro,
+    para que caller use apenas politica local.
+    """
+    if raw is None:
+        return None
+    try:
+        val = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
+
+
 # ── Helpers de configuracao ───────────────────────────────────────────────────
 # Bases oficiais sem `/v2`. O prefixo `/v2` e concatenado nas rotas para
 # garantir montagem correta independente de como FOCUSNFE_BASE_URL for
@@ -1357,21 +1373,33 @@ class FocusNFeProvider(GovProvider):
                 "http_status": 404,
             }
         elif status == 429:
-            return {
+            env = {
                 "ok":          False,
                 "provider":    "focusnfe",
                 "codigo":      "FOCUS_XML_RATE_LIMIT",
                 "erro":        "Rate limit atingido no FocusNFe (429).",
                 "http_status": 429,
             }
+            # G0.2a-R2: Retry-After normalizado apenas quando inteiro positivo.
+            # Nao interpreta data HTTP nesta fase. Header cru nunca repassado.
+            ra = _parse_retry_after_int(resp.headers.get("Retry-After"))
+            if ra is not None:
+                env["retry_after_seg"] = ra
+            return env
         elif status >= 500:
-            return {
+            env = {
                 "ok":          False,
                 "provider":    "focusnfe",
                 "codigo":      "FOCUS_XML_UPSTREAM_UNAVAILABLE",
                 "erro":        f"Upstream indisponivel ({status}).",
                 "http_status": status,
             }
+            # 503 pode carregar Retry-After tambem.
+            if status == 503:
+                ra = _parse_retry_after_int(resp.headers.get("Retry-After"))
+                if ra is not None:
+                    env["retry_after_seg"] = ra
+            return env
         else:
             return {
                 "ok":          False,

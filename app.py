@@ -990,14 +990,18 @@ def xml_por_chave():
         _log_stdout("xml_por_chave", "erro", trace_id,
                     source_system=source_system, doc_type=doc_type,
                     erro_msg=codigo)
-        return jsonify({
+        envelope_err = {
             "ok":            False,
             "trace_id":      trace_id,
             "codigo":        codigo,
             "erro":          res.get("erro") or "erro upstream",
             "provider":      "focusnfe",
             "http_upstream": upstream,
-        }), _status_para_codigo_xml_por_chave(codigo)
+        }
+        # G0.2a-R2: propaga retry_after_seg normalizado (nunca header cru).
+        if res.get("retry_after_seg") is not None:
+            envelope_err["retry_after_seg"] = res["retry_after_seg"]
+        return jsonify(envelope_err), _status_para_codigo_xml_por_chave(codigo)
 
     xml_bytes: bytes = res["xml_bytes"]
     _log_stdout("xml_por_chave", "ok", trace_id,

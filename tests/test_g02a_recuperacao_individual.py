@@ -611,3 +611,84 @@ class TestRegressivosContraBaseline:
         # DV errado
         bad = CHAVE_NFE_OK[:43] + str((int(CHAVE_NFE_OK[43]) + 1) % 10)
         assert fiscalone_app._chave_dfe_valida(bad) is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# G0.2a-R2 — Retry-After normalizado (NOVA_CAPACIDADE)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestRetryAfterR2:
+    """G0.2a-R2 — Retry-After propagado como retry_after_seg apenas quando
+    inteiro positivo. Header cru NUNCA repassado."""
+
+    def test_parse_retry_after_int_helper(self):
+        from providers.focusnfe_provider import _parse_retry_after_int
+        assert _parse_retry_after_int(None) is None
+        assert _parse_retry_after_int("") is None
+        assert _parse_retry_after_int("abc") is None
+        assert _parse_retry_after_int("0") is None
+        assert _parse_retry_after_int("-5") is None
+        # Data HTTP (RFC 7231) nao interpretada nesta fase
+        assert _parse_retry_after_int("Fri, 31 Dec 2026 23:59:59 GMT") is None
+        assert _parse_retry_after_int("120") == 120
+        assert _parse_retry_after_int(" 45 ") == 45
+        assert _parse_retry_after_int(30) == 30
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_429_com_retry_after_valido_propaga_no_provider(self, mock_get, provider):
+        mock_get.return_value = _mock_resp(
+            status=429, headers={"Retry-After": "180"}, content=b"")
+        r = provider.baixar_xml_bytes_por_chave("nfe", CHAVE_NFE_OK, "homologacao")
+        assert r["ok"] is False
+        assert r["codigo"] == "FOCUS_XML_RATE_LIMIT"
+        assert r["retry_after_seg"] == 180
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_429_sem_retry_after_nao_inventa(self, mock_get, provider):
+        mock_get.return_value = _mock_resp(status=429, content=b"")
+        r = provider.baixar_xml_bytes_por_chave("nfe", CHAVE_NFE_OK, "homologacao")
+        assert r["ok"] is False
+        assert r["codigo"] == "FOCUS_XML_RATE_LIMIT"
+        assert "retry_after_seg" not in r
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_429_com_retry_after_invalido_ignora(self, mock_get, provider):
+        mock_get.return_value = _mock_resp(
+            status=429, headers={"Retry-After": "abc"}, content=b"")
+        r = provider.baixar_xml_bytes_por_chave("nfe", CHAVE_NFE_OK, "homologacao")
+        assert "retry_after_seg" not in r
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_503_com_retry_after_propaga(self, mock_get, provider):
+        mock_get.return_value = _mock_resp(
+            status=503, headers={"Retry-After": "45"}, content=b"")
+        r = provider.baixar_xml_bytes_por_chave("nfe", CHAVE_NFE_OK, "homologacao")
+        assert r["codigo"] == "FOCUS_XML_UPSTREAM_UNAVAILABLE"
+        assert r["retry_after_seg"] == 45
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_500_nao_carrega_retry_after(self, mock_get, provider):
+        mock_get.return_value = _mock_resp(
+            status=500, headers={"Retry-After": "30"}, content=b"")
+        r = provider.baixar_xml_bytes_por_chave("nfe", CHAVE_NFE_OK, "homologacao")
+        # 500 (nao 503) nao le Retry-After — mantem semantica conservadora.
+        assert r["codigo"] == "FOCUS_XML_UPSTREAM_UNAVAILABLE"
+        assert "retry_after_seg" not in r
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_rota_propaga_retry_after_no_envelope_de_erro(self, mock_get, client):
+        mock_get.return_value = _mock_resp(
+            status=429, headers={"Retry-After": "120"}, content=b"")
+        r = _post_por_chave(client, _body_focus("nfe", CHAVE_NFE_OK))
+        assert r.status_code == 429
+        j = r.get_json()
+        assert j["codigo"] == "FOCUS_XML_RATE_LIMIT"
+        assert j["retry_after_seg"] == 120
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_rota_nao_repassa_header_cru_retry_after(self, mock_get, client):
+        mock_get.return_value = _mock_resp(
+            status=429, headers={"Retry-After": "60"}, content=b"")
+        r = _post_por_chave(client, _body_focus("nfe", CHAVE_NFE_OK))
+        # Header cru "Retry-After" nunca deve estar no response da rota nova.
+        assert "Retry-After" not in r.headers
