@@ -937,3 +937,115 @@ eram filtradas de `pendentes_versoes`, e o cursor podia avancar ate
   INVALIDA`).
 
 Suite total: **382/382** verdes (+65 vs. rev.2).
+
+## G0.2a · POST /fiscal/xml/por-chave — recuperacao individual segura (2026-07-28)
+
+Fatia mínima do ADR-0049 §5.3. Endpoint stateless que recupera o XML
+oficial upstream a partir de chave/identificador. Pré-condição do G0.2b
+(cliente MapOne e drenagem da fila `DocumentoPendenteRecuperacao`).
+
+**Contrato**
+
+- Rota: `POST /fiscal/xml/por-chave`.
+- Autenticação M2M obrigatória via header `X-RLogix-Service-Token`
+  (comparação constant-time com `FISCALONE_M2M_TOKEN`).
+- Payload JSON:
+  ```json
+  {
+    "doc_type":       "nfe|nfse|cte",
+    "identificador":  "<chave 44 dig | ident opaco NFSe>",
+    "provider":       "focusnfe|sefaz",
+    "ambiente":       "producao|homologacao",
+    "focusnfe_token": "<segredo>"
+  }
+  ```
+- Sucesso: HTTP 200, body = bytes **EXATOS** upstream (`resp.content`),
+  `Content-Type: application/xml`. Nenhum JSON/base64/decode/reencode.
+- Headers seguros: `X-Trace-Id`, `X-RLogix-Provider`, `X-RLogix-Ambiente`,
+  `X-RLogix-Upstream-Status`, `X-RLogix-Content-SHA256`, `Content-Length`.
+  Chave completa, CNPJ, token e XML NUNCA em header.
+- Erro: envelope JSON tipado. Nenhum conteúdo integral em erro.
+
+**Paths oficiais plurais (FocusNFe v2)**
+
+| doc_type | Path upstream |
+|---|---|
+| `nfe`  | `GET /v2/nfes_recebidas/{chave}.xml` |
+| `nfse` | `GET /v2/nfsens_recebidas/{ident_escapado}.xml` |
+| `cte`  | `GET /v2/ctes_recebidas/{chave}.xml` |
+
+**Diferença entre bytes brutos da rota nova e contrato textual legado
+do lote:** a rota `/fiscal/xml/por-chave` devolve `xml_bytes` do
+`resp.content` sem decode. O contrato antigo do lote `gov_fetch` (campo
+`xml_bruto: str` em cada `documento[]`) continua textual — obtido por
+`xml_bytes.decode("utf-8", errors="replace")` no wrapper legado. O
+SHA-256 passou a ser calculado sobre bytes upstream nos dois caminhos
+(mais correto). Testes existentes só validavam o comprimento do hash
+(`== 64`), portanto continuam verdes.
+
+**Autenticação M2M — condição de deploy**
+
+- Servidor sem `FISCALONE_M2M_TOKEN` configurado: rota responde
+  `HTTP 503 · M2M_NAO_CONFIGURADO` (fail-closed).
+- Header ausente/divergente: `HTTP 401 · M2M_NAO_AUTORIZADO`.
+- Comparação com `hmac.compare_digest` (constant-time).
+- Token nunca é logado, serializado ou devolvido.
+- **Não faça deploy** antes de o cliente MapOne (G0.2b) enviar o header
+  e a configuração ser provisionada nos dois lados.
+
+**FiscalOne stateless e sem interpretação**
+
+O provider apenas transporta bytes. Não parseia, não valida esquema,
+não confere DV interno (apenas a rota valida DV modulo 11 para
+NF-e/CT-e antes do GET). CtrlOne, banco, wallet, evento fiscal — nada
+disso é alcançado.
+
+**SEFAZ direto — não implementado nesta fase**
+
+`provider=sefaz` retorna `HTTP 501 · RECUPERACAO_INDIVIDUAL_SEFAZ_
+NAO_IMPLEMENTADA` **antes** de instanciar qualquer provider (fail-
+closed). `providers/sefaz_provider.py` continua com stubs originais em
+`detalhe_nfe/detalhe_cte`.
+
+**Nove rotas de emissão permanecem bloqueadas por design**
+
+`POST /fiscal/nfe`, `DELETE /fiscal/nfe/<chave>`, `POST /fiscal/nfe/<chave>/inutilizar`, `POST /fiscal/nfe/<chave>/cce`, `POST /fiscal/cte`, `DELETE /fiscal/cte/<chave>`, `POST /fiscal/mdfe`, `POST /fiscal/mdfe/<chave>/encerrar`, `POST /fiscal/mdfe/<chave>/condutor` — todas retornam `HTTP 403 · EMISSAO_BLOQUEADA`. Nenhuma foi tocada em G0.2a.
+
+**Nenhum evento fiscal exposto pela rota nova**
+
+Campos `acao`/`tipo` no payload são ignorados. Nenhum caminho da rota
+invoca `manifestar_nfe_recebida`, `bloquear_emissao`, `cancelar_*`,
+`inutilizar_*` ou similares.
+
+**Testes G0.2a**
+
+`tests/test_g02a_recuperacao_individual.py` — 51 casos:
+
+- **Provider (11)**: paths plurais NF-e/NFSe/CT-e, SHA-256 sobre bytes,
+  bytes não-UTF-8 idênticos, 401/403/404/429/5xx/timeout distintos,
+  redirect não vaza Authorization.
+- **Rota (15+)**: M2M ausente/divergente/não configurado, corpo binário
+  idêntico para NF-e/CT-e/NFSe, escape defensivo NFSe (`/`, `?` → `%2F`,
+  `%3F`), rejeição de chars de controle, tamanho máximo, DV inválido,
+  SEFAZ fail-closed sem instanciar provider, provider desconhecido,
+  404 distinto de credencial, segredo/conteúdo fiscal ausentes em log/
+  headers/body, sem SQL/disco.
+- **Preservação (13)**: 9 rotas de emissão bloqueadas + rota nova não
+  aceita ação/evento + rota nova não alcança manifesto + rota de
+  manifesto preservada.
+- **Regressivos (7)**: rota registrada, métodos provider existentes,
+  helper interno, constante M2M, helper `_m2m_check`, `_chave_dfe_valida`.
+
+Cada teste REGRESSIVO/NOVA_CAPACIDADE falha contra `d8d832f7`:
+41 failed / 10 passed (10 preservações) no snapshot baseline. Após
+G0.2a: **433/433** verdes na suíte completa (baseline 382 + 51 novos).
+
+**Limitações e inferências**
+
+- CT-e por chave via FocusNFe: endpoint `/v2/ctes_recebidas/{chave}.xml`
+  é a hipótese natural (plural igual a `nfes_recebidas`/`nfsens_recebidas`);
+  não foi validado contra a API real nesta fase — **NÃO COMPROVADO**
+  em produção, apenas em contrato de teste.
+- "XML chega após ciência" permanece **INFERÊNCIA** — não fato — sobre
+  o comportamento da FocusNFe/SEFAZ, herdado do Discovery G0.2 anterior.
+- **G0.2b não iniciado.**

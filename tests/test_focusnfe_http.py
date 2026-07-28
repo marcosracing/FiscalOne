@@ -679,6 +679,7 @@ class TestBaixarXmlCompleto:
         resp = MagicMock(spec=requests.Response)
         resp.status_code = 200
         resp.text = xml
+        resp.content = xml.encode("utf-8")
         with patch("providers.focusnfe_provider.requests.get", return_value=resp) as mg:
             r = provider_com_token.baixar_xml_completo("A" * 44)
         assert r["ok"] is True
@@ -733,6 +734,7 @@ class TestBaixarXmlCompleto:
         resp = MagicMock(spec=requests.Response)
         resp.status_code = 200
         resp.text = "<nfeProc/>"
+        resp.content = b"<nfeProc/>"
         with patch("providers.focusnfe_provider.requests.get", return_value=resp):
             r = provider_com_token.baixar_xml_completo("A" * 44)
         payload = str(r).lower()
@@ -753,6 +755,8 @@ class TestGovFetchComXml:
         resp = MagicMock(spec=requests.Response)
         resp.status_code = status
         resp.text = xml
+        # G0.2a: helper interno usa resp.content (bytes).
+        resp.content = (xml or "").encode("utf-8")
         return resp
 
     def test_nfe_completa_true_baixa_xml_e_vira_completo(self, provider_com_token):

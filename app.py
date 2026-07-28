@@ -14,12 +14,15 @@ Capacidade atual:
   - trace_id propaga em toda operação — não armazena.
 Porta: 5002
 """
-import os
-import logging
-import uuid
-import time
-import zipfile
+import hmac
 import io
+import logging
+import os
+import re
+import time
+import urllib.parse
+import uuid
+import zipfile
 from flask import Flask, jsonify, request
 from werkzeug.exceptions import HTTPException
 
@@ -735,6 +738,278 @@ def _status_para_codigo(codigo):
     if codigo == "FOCUS_MANIFESTO_HTTP_ERROR":
         return 502
     return 500
+
+# ── POST /fiscal/xml/por-chave (Fase G0.2a — ADR-0049) ────────────────────────
+# Recuperacao INDIVIDUAL segura de XML upstream. Nao gera evento fiscal.
+# Autenticacao M2M via X-RLogix-Service-Token (constant-time).
+# Body de sucesso: bytes EXATOS upstream, application/xml.
+
+_M2M_HEADER_NAME = "X-RLogix-Service-Token"
+_M2M_TOKEN_ENV = "FISCALONE_M2M_TOKEN"
+_NFSE_IDENT_MAX = 200
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1F\x7F]")
+
+
+def _m2m_check(req):
+    """Trava M2M para a rota /fiscal/xml/por-chave.
+
+    Retorna (ok:bool, codigo:str|None, http_status:int).
+    - configuracao ausente no servidor: (False, M2M_NAO_CONFIGURADO, 503);
+    - token ausente/divergente: (False, M2M_NAO_AUTORIZADO, 401);
+    - constant-time via hmac.compare_digest;
+    - nao loga nem retorna o token.
+    """
+    expected = os.environ.get(_M2M_TOKEN_ENV, "")
+    if not expected:
+        return False, "M2M_NAO_CONFIGURADO", 503
+    got = req.headers.get(_M2M_HEADER_NAME, "")
+    if not got or not hmac.compare_digest(got, expected):
+        return False, "M2M_NAO_AUTORIZADO", 401
+    return True, None, 200
+
+
+def _dv_chave_dfe(digitos_43: str) -> str:
+    """DV modulo 11 SEFAZ para chave NF-e/CT-e (43 digitos + 1 DV)."""
+    pesos = [2, 3, 4, 5, 6, 7, 8, 9]
+    soma = 0
+    for i, ch in enumerate(reversed(digitos_43)):
+        soma += int(ch) * pesos[i % 8]
+    resto = soma % 11
+    dv = 11 - resto
+    return "0" if dv in (10, 11) else str(dv)
+
+
+def _chave_dfe_valida(chave: str) -> bool:
+    """44 digitos numericos com DV modulo 11 valido."""
+    if not chave or len(chave) != 44 or not chave.isdigit():
+        return False
+    return _dv_chave_dfe(chave[:43]) == chave[43]
+
+
+def _status_para_codigo_xml_por_chave(codigo: str) -> int:
+    """Mapeia codigo upstream para HTTP status da rota /fiscal/xml/por-chave.
+    401/403/timeout/rate/404 upstream sao TRADUZIDOS — nao confundir com
+    401 M2M local (que nunca chega aqui)."""
+    if codigo == "FOCUS_XML_NAO_ENCONTRADO":
+        return 404
+    if codigo == "FOCUS_XML_RATE_LIMIT":
+        return 429
+    if codigo == "FOCUS_XML_TIMEOUT":
+        return 504
+    if codigo == "FOCUS_BAD_REQUEST":
+        return 400
+    if codigo == "FOCUS_TOKEN_AUSENTE":
+        # Token FocusNFe ausente e configuracao do cliente/tenant — 400.
+        return 400
+    if codigo in (
+        "FOCUS_XML_AUTH_ERROR",           # upstream 401/403
+        "FOCUS_XML_UPSTREAM_UNAVAILABLE", # upstream 5xx
+        "FOCUS_XML_HTTP_ERROR",           # upstream status inesperado
+        "FOCUS_XML_ERRO",                 # excecao de conexao upstream
+        "FOCUS_XML_NO_LOCATION",          # redirect sem Location
+        "FOCUS_XML_VAZIO",                # upstream 200 sem body
+    ):
+        return 502
+    return 502
+
+
+@app.route("/fiscal/xml/por-chave", methods=["POST"])
+def xml_por_chave():
+    """Recuperacao INDIVIDUAL de XML upstream por chave/identificador.
+
+    Fase G0.2a (ADR-0049 §5.3) — pre-condicao do G0.2b.
+
+    Contrato:
+      Autenticacao: header `X-RLogix-Service-Token` (M2M, constant-time).
+      Payload JSON:
+        {
+          "doc_type":       "nfe" | "nfse" | "cte",
+          "identificador":  "<chave 44 dig | ident opaco NFSe>",
+          "provider":       "focusnfe" | "sefaz",
+          "ambiente":       "producao" | "homologacao",
+          "focusnfe_token": "<segredo>"
+        }
+      Sucesso: HTTP 200, body = bytes EXATOS upstream, application/xml,
+        headers seguros (trace/provider/ambiente/upstream_status/sha256/length).
+      Erro: envelope JSON tipado. Nunca devolve conteudo upstream integral em erro.
+
+    FiscalOne stateless — nao interpreta conteudo fiscal, nao gera evento.
+    """
+    trace_id      = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+
+    # 1) Trava M2M — primeira porta antes de qualquer processamento.
+    ok_m2m, m2m_codigo, m2m_status = _m2m_check(request)
+    if not ok_m2m:
+        _log_stdout("xml_por_chave", "erro", trace_id,
+                    source_system=source_system, erro_msg=m2m_codigo)
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   m2m_codigo,
+            "erro":     ("Servidor sem M2M configurado."
+                         if m2m_codigo == "M2M_NAO_CONFIGURADO"
+                         else "Token M2M ausente ou invalido."),
+        }), m2m_status
+
+    # 2) Payload
+    try:
+        payload = request.get_json(silent=True) or {}
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict) or not payload:
+        _log_stdout("xml_por_chave", "erro", trace_id,
+                    source_system=source_system,
+                    erro_msg="PAYLOAD_INVALIDO")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "PAYLOAD_INVALIDO",
+            "erro":     "Payload JSON obrigatorio.",
+        }), 400
+
+    # 3) Sanitizacao — POP campos sensiveis ANTES de qualquer log/serializacao.
+    focusnfe_token = payload.pop("focusnfe_token", None)
+    payload.pop("Authorization", None)
+    payload.pop("authorization", None)
+    payload.pop("cert_pfx_base64", None)
+    payload.pop("cert_password", None)
+    payload.pop("cert_cnpj", None)
+    payload.pop("cert_valid_until", None)
+
+    doc_type      = str(payload.get("doc_type") or "").strip().lower()
+    identificador = str(payload.get("identificador") or "").strip()
+    provider_p    = str(payload.get("provider") or "").strip().lower()
+    ambiente      = str(payload.get("ambiente") or "").strip().lower() or "homologacao"
+
+    # 4) doc_type
+    if doc_type not in ("nfe", "nfse", "cte"):
+        _log_stdout("xml_por_chave", "erro", trace_id,
+                    source_system=source_system,
+                    erro_msg=f"TIPO_NAO_SUPORTADO:{doc_type!r}")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "TIPO_NAO_SUPORTADO",
+            "erro":     "doc_type obrigatorio: 'nfe', 'nfse' ou 'cte'.",
+        }), 400
+
+    # 5) Identificador
+    if not identificador:
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "IDENTIFICADOR_AUSENTE",
+            "erro":     "identificador obrigatorio.",
+        }), 400
+    if _CONTROL_CHARS_RE.search(identificador):
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "IDENTIFICADOR_INVALIDO",
+            "erro":     "identificador contem caracteres de controle.",
+        }), 400
+    if doc_type in ("nfe", "cte"):
+        if not _chave_dfe_valida(identificador):
+            _log_stdout("xml_por_chave", "erro", trace_id,
+                        source_system=source_system, doc_type=doc_type,
+                        erro_msg="CHAVE_DFE_INVALIDA")
+            return jsonify({
+                "ok":       False,
+                "trace_id": trace_id,
+                "codigo":   "CHAVE_DFE_INVALIDA",
+                "erro":     "Chave DFe invalida (44 digitos + DV modulo 11).",
+            }), 400
+        ident_upstream = identificador
+    else:  # nfse
+        if len(identificador) > _NFSE_IDENT_MAX:
+            return jsonify({
+                "ok":       False,
+                "trace_id": trace_id,
+                "codigo":   "IDENTIFICADOR_INVALIDO",
+                "erro":     f"identificador NFSe excede tamanho maximo ({_NFSE_IDENT_MAX}).",
+            }), 400
+        # Escape defensivo: '/', '..', '?', '#' nao alteram path upstream.
+        ident_upstream = urllib.parse.quote(identificador, safe="")
+
+    # 6) Provider — fail-closed para SEFAZ antes de instanciar.
+    if provider_p == "sefaz":
+        _log_stdout("xml_por_chave", "erro", trace_id,
+                    source_system=source_system, doc_type=doc_type,
+                    erro_msg="RECUPERACAO_INDIVIDUAL_SEFAZ_NAO_IMPLEMENTADA")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "RECUPERACAO_INDIVIDUAL_SEFAZ_NAO_IMPLEMENTADA",
+            "erro":     "Recuperacao individual via SEFAZ direto nao esta implementada nesta fase.",
+        }), 501
+    if provider_p != "focusnfe":
+        _log_stdout("xml_por_chave", "erro", trace_id,
+                    source_system=source_system, doc_type=doc_type,
+                    erro_msg=f"PROVIDER_NAO_SUPORTADO:{provider_p!r}")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "PROVIDER_NAO_SUPORTADO",
+            "erro":     "provider nao suportado.",
+        }), 400
+
+    # 7) Ambiente
+    if ambiente not in ("producao", "homologacao"):
+        ambiente = "homologacao"
+
+    # 8) Execucao — provider FocusNFe recupera bytes brutos.
+    try:
+        provider = get_provider("focusnfe", token=focusnfe_token)
+        res = provider.baixar_xml_bytes_por_chave(doc_type, ident_upstream, ambiente)
+    except Exception as exc:
+        _log_stdout("xml_por_chave", "erro", trace_id,
+                    source_system=source_system, doc_type=doc_type,
+                    erro_msg=f"{type(exc).__name__}: excecao interna")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "ERRO_INTERNO",
+            "erro":     "Erro interno ao recuperar XML upstream.",
+        }), 500
+    finally:
+        try:
+            focusnfe_token = None
+            del focusnfe_token
+        except UnboundLocalError:
+            pass
+
+    if not res.get("ok"):
+        codigo = res.get("codigo") or "FOCUS_XML_ERRO"
+        upstream = res.get("http_status")
+        _log_stdout("xml_por_chave", "erro", trace_id,
+                    source_system=source_system, doc_type=doc_type,
+                    erro_msg=codigo)
+        return jsonify({
+            "ok":            False,
+            "trace_id":      trace_id,
+            "codigo":        codigo,
+            "erro":          res.get("erro") or "erro upstream",
+            "provider":      "focusnfe",
+            "http_upstream": upstream,
+        }), _status_para_codigo_xml_por_chave(codigo)
+
+    xml_bytes: bytes = res["xml_bytes"]
+    _log_stdout("xml_por_chave", "ok", trace_id,
+                source_system=source_system, doc_type=doc_type)
+    resp = app.response_class(
+        response=xml_bytes,
+        status=200,
+        mimetype="application/xml",
+    )
+    resp.headers["X-Trace-Id"]               = trace_id
+    resp.headers["X-RLogix-Provider"]        = "focusnfe"
+    resp.headers["X-RLogix-Ambiente"]        = ambiente
+    resp.headers["X-RLogix-Upstream-Status"] = str(res.get("http_status") or 200)
+    resp.headers["X-RLogix-Content-SHA256"]  = res["xml_hash_sha256"]
+    resp.headers["Content-Length"]           = str(len(xml_bytes))
+    return resp
+
 
 # ── POST /fiscal/nfe/recebida/manifesto ───────────────────────────────────────
 

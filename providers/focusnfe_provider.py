@@ -1197,16 +1197,236 @@ class FocusNFeProvider(GovProvider):
             "tamanho":  len(body),
         }
 
-    # ── baixar_xml_completo — nfeProc XML por chave (Fase E4a) ─────────────
+    # ── Helper interno comum: GET XML upstream em BYTES (Fase G0.2a) ───
+    def _http_get_xml_bytes_upstream(
+        self,
+        url: str,
+        *,
+        permitir_redirect: bool = False,
+        timeout: int | None = None,
+    ) -> dict:
+        """GET de XML recebido, preservando bytes upstream sem decode.
+
+        Usado por baixar_xml_completo (NF-e), baixar_xml_nfse (via url_xml),
+        baixar_xml_nfse_por_chave (NFSe), baixar_xml_cte_por_chave (CT-e)
+        e baixar_xml_bytes_por_chave (rota G0.2a).
+
+        Contrato:
+        - Basic auth via self._require_token(); nunca Bearer.
+        - Accept: application/xml.
+        - resp.content (bytes); SHA-256 direto sobre esses bytes.
+        - allow_redirects=False. Se permitir_redirect=True e chegar 3xx:
+          valida Location e faz segundo GET SEM Authorization
+          (URL pre-assinada carrega assinatura no query string).
+        - Trata timeout/conexao/401/403/404/429/5xx separadamente.
+        - Token, Authorization, XML, URL pre-assinada nunca em erro/log.
+
+        Retorno OK:  {ok, provider, xml_bytes, xml_hash_sha256, tamanho, http_status}
+        Retorno erro: envelope tipado sem conteudo/token.
+        """
+        try:
+            token = self._require_token()
+        except RuntimeError as exc:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_TOKEN_AUSENTE",
+                "erro":     str(exc),
+            }
+        headers_auth = {**_basic_auth_header(token),
+                        "Accept": "application/xml"}
+        tmo = int(timeout) if timeout else (
+            min(self._timeout, 5) if self._timeout else 5
+        )
+        try:
+            resp = requests.get(url, headers=headers_auth,
+                                allow_redirects=False, timeout=tmo)
+        except requests.exceptions.Timeout:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_XML_TIMEOUT",
+                "erro":     f"Timeout ({tmo}s) baixando XML upstream.",
+            }
+        except requests.exceptions.RequestException as exc:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_XML_ERRO",
+                "erro":     f"Erro HTTP: {type(exc).__name__}.",
+            }
+        finally:
+            try:
+                del token
+            except NameError:
+                pass
+            try:
+                del headers_auth
+            except NameError:
+                pass
+
+        status = resp.status_code
+
+        # Redirect (opt-in) — segundo GET SEM Authorization
+        if permitir_redirect and status in (301, 302, 303, 307, 308):
+            location = (resp.headers.get("Location") or "").strip()
+            if not location:
+                return {
+                    "ok":          False,
+                    "provider":    "focusnfe",
+                    "codigo":      "FOCUS_XML_NO_LOCATION",
+                    "erro":        f"Redirect {status} sem Location.",
+                    "http_status": status,
+                }
+            try:
+                resp2 = requests.get(
+                    location,
+                    headers={"Accept": "application/xml"},
+                    allow_redirects=False, timeout=tmo,
+                )
+            except requests.exceptions.Timeout:
+                return {
+                    "ok":       False,
+                    "provider": "focusnfe",
+                    "codigo":   "FOCUS_XML_TIMEOUT",
+                    "erro":     f"Timeout ({tmo}s) baixando XML pre-assinado.",
+                }
+            except requests.exceptions.RequestException as exc:
+                return {
+                    "ok":       False,
+                    "provider": "focusnfe",
+                    "codigo":   "FOCUS_XML_ERRO",
+                    "erro":     f"Erro download pre-assinado: {type(exc).__name__}.",
+                }
+            if resp2.status_code != 200:
+                return {
+                    "ok":          False,
+                    "provider":    "focusnfe",
+                    "codigo":      "FOCUS_XML_HTTP_ERROR",
+                    "erro":        f"Storage devolveu {resp2.status_code}.",
+                    "http_status": resp2.status_code,
+                }
+            body_bytes = resp2.content or b""
+            upstream_status = resp2.status_code
+        elif status == 200:
+            body_bytes = resp.content or b""
+            upstream_status = 200
+        elif status in (401, 403):
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "FOCUS_XML_AUTH_ERROR",
+                "erro":        f"Autenticacao rejeitada pelo upstream ({status}).",
+                "http_status": status,
+            }
+        elif status == 404:
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "FOCUS_XML_NAO_ENCONTRADO",
+                "erro":        "XML nao encontrado no FocusNFe (404).",
+                "http_status": 404,
+            }
+        elif status == 429:
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "FOCUS_XML_RATE_LIMIT",
+                "erro":        "Rate limit atingido no FocusNFe (429).",
+                "http_status": 429,
+            }
+        elif status >= 500:
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "FOCUS_XML_UPSTREAM_UNAVAILABLE",
+                "erro":        f"Upstream indisponivel ({status}).",
+                "http_status": status,
+            }
+        else:
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "FOCUS_XML_HTTP_ERROR",
+                "erro":        f"Status HTTP inesperado ({status}).",
+                "http_status": status,
+            }
+
+        if not body_bytes:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_XML_VAZIO",
+                "erro":     "Focus devolveu corpo vazio para XML.",
+            }
+        sha = hashlib.sha256(body_bytes).hexdigest()
+        return {
+            "ok":              True,
+            "provider":        "focusnfe",
+            "xml_bytes":       body_bytes,
+            "xml_hash_sha256": sha,
+            "tamanho":         len(body_bytes),
+            "http_status":     upstream_status,
+        }
+
+    # ── baixar_xml_bytes_por_chave — RECUPERACAO INDIVIDUAL (G0.2a) ──
+    def baixar_xml_bytes_por_chave(
+        self,
+        doc_type: str,
+        identificador: str,
+        ambiente: str | None = None,
+    ) -> dict:
+        """Recuperacao bruta de XML upstream por chave/identificador.
+
+        Contrato G0.2a — bytes puros (nunca decode/reencode).
+
+        - doc_type='nfe'  -> GET {base}/v2/nfes_recebidas/{chave}.xml
+        - doc_type='cte'  -> GET {base}/v2/ctes_recebidas/{chave}.xml
+        - doc_type='nfse' -> GET {base}/v2/nfsens_recebidas/{ident_esc}.xml
+
+        A validacao (chave 44 dig / DV / escape de segmento NFSe) e
+        responsabilidade da camada superior (rota `/fiscal/xml/por-chave`).
+        Este metodo nao interpreta conteudo fiscal.
+
+        Retorno OK:  {ok, provider, xml_bytes, xml_hash_sha256, tamanho, http_status}
+        Retorno erro: envelope tipado sem conteudo/token.
+        """
+        dt = str(doc_type or "").strip().lower()
+        ident = str(identificador or "").strip()
+        if not ident:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_BAD_REQUEST",
+                "erro":     "identificador obrigatorio.",
+            }
+        if dt == "nfe":
+            path = f"/v2/nfes_recebidas/{ident}.xml"
+        elif dt == "cte":
+            path = f"/v2/ctes_recebidas/{ident}.xml"
+        elif dt == "nfse":
+            # Escape ja aplicado pelo caller (rota) para NFSe.
+            path = f"/v2/nfsens_recebidas/{ident}.xml"
+        else:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_XML_TIPO_NAO_SUPORTADO",
+                "erro":     f"doc_type nao suportado: {dt!r}",
+            }
+        base_url = self._base_url_for(ambiente)
+        url = f"{base_url}{path}"
+        return self._http_get_xml_bytes_upstream(url, permitir_redirect=False)
+
+    # ── baixar_xml_completo — NF-e por chave (Fase E4a, G0.2a refactor) ──
     def baixar_xml_completo(self, chave: str, ambiente: str | None = None) -> dict:
         """Baixa XML nfeProc da FocusNFe pelo endpoint separado.
 
         Endpoint: GET {base_url}/v2/nfes_recebidas/{chave}.xml
-        Headers:  Authorization Basic + Accept: application/xml
-        Sem redirect (diferente do DANFE — Focus entrega XML direto).
-        Timeout curto (min(self._timeout, 5)) para nao travar batch.
+        Refatorado em G0.2a: delega ao helper interno; contrato do lote
+        preservado — `xml_bruto` (str) mantido para consumidores existentes.
 
-        Retorno OK:  {ok, provider, xml_bruto, xml_hash_sha256, tamanho}
+        Retorno OK:  {ok, provider, xml_bruto, xml_hash_sha256, tamanho, ...}
         Retorno erro:{ok:False, provider, codigo, erro} — token nunca vaza.
         """
         chave = str(chave or "").strip()
@@ -1217,90 +1437,28 @@ class FocusNFeProvider(GovProvider):
                 "codigo":   "FOCUS_BAD_REQUEST",
                 "erro":     "chave obrigatoria.",
             }
-        try:
-            token = self._require_token()
-        except RuntimeError as exc:
-            return {
-                "ok":       False,
-                "provider": "focusnfe",
-                "codigo":   "FOCUS_TOKEN_AUSENTE",
-                "erro":     str(exc),
-            }
-        base_url = self._base_url_for(ambiente)
-        url = f"{base_url}/v2/nfes_recebidas/{chave}.xml"
-        headers_auth = {**_basic_auth_header(token), "Accept": "application/xml"}
-        # Timeout curto para evitar travar batch de ate 25 XMLs.
-        timeout_xml = min(self._timeout, 5) if self._timeout else 5
-        try:
-            resp = requests.get(url, headers=headers_auth,
-                                allow_redirects=False, timeout=timeout_xml)
-        except requests.exceptions.Timeout:
-            return {
-                "ok":       False,
-                "provider": "focusnfe",
-                "codigo":   "FOCUS_XML_TIMEOUT",
-                "erro":     f"Timeout ({timeout_xml}s) baixando XML nfeProc.",
-            }
-        except requests.exceptions.RequestException as exc:
-            return {
-                "ok":       False,
-                "provider": "focusnfe",
-                "codigo":   "FOCUS_XML_ERRO",
-                "erro":     f"Erro HTTP: {type(exc).__name__}.",
-            }
-        finally:
-            # Defesa em profundidade — descartar refs a token/header apos uso.
-            del token
-            del headers_auth
-
-        if resp.status_code == 404:
-            return {
-                "ok":          False,
-                "provider":    "focusnfe",
-                "codigo":      "FOCUS_XML_NAO_ENCONTRADO",
-                "erro":        "XML nfeProc nao encontrado no FocusNFe (404).",
-                "http_status": 404,
-            }
-        if resp.status_code != 200:
-            return {
-                "ok":          False,
-                "provider":    "focusnfe",
-                "codigo":      "FOCUS_XML_HTTP_ERROR",
-                "erro":        f"Status HTTP inesperado ({resp.status_code}).",
-                "http_status": resp.status_code,
-            }
-        body = resp.text or ""
-        if not body:
-            return {
-                "ok":       False,
-                "provider": "focusnfe",
-                "codigo":   "FOCUS_XML_VAZIO",
-                "erro":     "Focus devolveu corpo vazio para XML.",
-            }
-        sha256 = hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()
+        res = self.baixar_xml_bytes_por_chave("nfe", chave, ambiente)
+        if not res.get("ok"):
+            return res
+        # Wrapper legado: expoe xml_bruto (str) para gov_fetch e testes E4a.
+        # SHA-256 continua sobre bytes upstream (correcao G0.2a).
+        body_bytes: bytes = res["xml_bytes"]
         return {
             "ok":              True,
             "provider":        "focusnfe",
-            "xml_bruto":       body,
-            "xml_hash_sha256": sha256,
-            "tamanho":         len(body),
+            "xml_bruto":       body_bytes.decode("utf-8", errors="replace"),
+            "xml_bytes":       body_bytes,
+            "xml_hash_sha256": res["xml_hash_sha256"],
+            "tamanho":         res["tamanho"],
         }
 
-    # ── baixar_xml_nfse — nfse XML via url_xml (Fase E4c) ────────────────
+    # ── baixar_xml_nfse — nfse XML via url_xml (Fase E4c, G0.2a refactor) ──
     def baixar_xml_nfse(self, url_xml: str) -> dict:
         """Baixa XML NFSe Nacional a partir da `url_xml` fornecida pelo item
         da listagem `/v2/nfsens_recebidas`.
 
-        Diferencas vs `baixar_xml_completo` (NF-e por chave):
-        - URL nao eh construida — vem do proprio item Focus.
-        - Comportamento de redirect: se URL retornada for pre-assinada
-          (ex.: storage externo), o segundo GET pode nao aceitar
-          Authorization. Padrao E4c: **envia Authorization no primeiro
-          GET**; se receber 3xx sem Location, retorna erro estruturado.
-        - Timeout curto (min(self._timeout, 5)) — evita travar batch.
-
-        Retorno OK:  {ok, provider, xml_bruto, xml_hash_sha256, tamanho}
-        Retorno erro:{ok:False, provider, codigo, erro} — token nao vaza.
+        Refatorado em G0.2a: delega ao helper com permitir_redirect=True.
+        Contrato do lote preservado.
         """
         url = str(url_xml or "").strip()
         if not url:
@@ -1310,119 +1468,27 @@ class FocusNFeProvider(GovProvider):
                 "codigo":   "FOCUS_BAD_REQUEST",
                 "erro":     "url_xml obrigatoria.",
             }
-        try:
-            token = self._require_token()
-        except RuntimeError as exc:
-            return {
-                "ok":       False,
-                "provider": "focusnfe",
-                "codigo":   "FOCUS_TOKEN_AUSENTE",
-                "erro":     str(exc),
-            }
-        headers_auth = {**_basic_auth_header(token), "Accept": "application/xml"}
-        timeout_xml = min(self._timeout, 5) if self._timeout else 5
-        try:
-            resp = requests.get(url, headers=headers_auth,
-                                allow_redirects=False, timeout=timeout_xml)
-        except requests.exceptions.Timeout:
-            return {
-                "ok":       False,
-                "provider": "focusnfe",
-                "codigo":   "FOCUS_XML_TIMEOUT",
-                "erro":     f"Timeout ({timeout_xml}s) baixando XML NFSe.",
-            }
-        except requests.exceptions.RequestException as exc:
-            return {
-                "ok":       False,
-                "provider": "focusnfe",
-                "codigo":   "FOCUS_XML_ERRO",
-                "erro":     f"Erro HTTP: {type(exc).__name__}.",
-            }
-        finally:
-            del token
-            del headers_auth
-
-        # Redirect: URL pre-assinada. Segundo GET SEM Authorization
-        # (URL ja carrega assinatura no query string).
-        if resp.status_code in (301, 302, 303, 307, 308):
-            location = resp.headers.get("Location", "").strip()
-            if not location:
-                return {
-                    "ok":       False,
-                    "provider": "focusnfe",
-                    "codigo":   "FOCUS_XML_NO_LOCATION",
-                    "erro":     f"Redirect {resp.status_code} sem Location.",
-                }
-            try:
-                resp2 = requests.get(location, headers={"Accept": "application/xml"},
-                                     allow_redirects=False, timeout=timeout_xml)
-            except requests.exceptions.RequestException as exc:
-                return {
-                    "ok":       False,
-                    "provider": "focusnfe",
-                    "codigo":   "FOCUS_XML_ERRO",
-                    "erro":     f"Erro download pre-assinado: {type(exc).__name__}.",
-                }
-            if resp2.status_code != 200:
-                return {
-                    "ok":          False,
-                    "provider":    "focusnfe",
-                    "codigo":      "FOCUS_XML_HTTP_ERROR",
-                    "erro":        f"Storage devolveu {resp2.status_code}.",
-                    "http_status": resp2.status_code,
-                }
-            body = resp2.text or ""
-        elif resp.status_code == 404:
-            return {
-                "ok":          False,
-                "provider":    "focusnfe",
-                "codigo":      "FOCUS_XML_NAO_ENCONTRADO",
-                "erro":        "XML NFSe nao encontrado (404).",
-                "http_status": 404,
-            }
-        elif resp.status_code != 200:
-            return {
-                "ok":          False,
-                "provider":    "focusnfe",
-                "codigo":      "FOCUS_XML_HTTP_ERROR",
-                "erro":        f"Status HTTP inesperado ({resp.status_code}).",
-                "http_status": resp.status_code,
-            }
-        else:
-            body = resp.text or ""
-
-        if not body:
-            return {
-                "ok":       False,
-                "provider": "focusnfe",
-                "codigo":   "FOCUS_XML_VAZIO",
-                "erro":     "Corpo XML vazio.",
-            }
-        sha256 = hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()
+        res = self._http_get_xml_bytes_upstream(url, permitir_redirect=True)
+        if not res.get("ok"):
+            return res
+        body_bytes: bytes = res["xml_bytes"]
         return {
             "ok":              True,
             "provider":        "focusnfe",
-            "xml_bruto":       body,
-            "xml_hash_sha256": sha256,
-            "tamanho":         len(body),
+            "xml_bruto":       body_bytes.decode("utf-8", errors="replace"),
+            "xml_bytes":       body_bytes,
+            "xml_hash_sha256": res["xml_hash_sha256"],
+            "tamanho":         res["tamanho"],
         }
 
-    # ── baixar_xml_nfse_por_chave — endpoint OFICIAL NFSe por chave ────
+    # ── baixar_xml_nfse_por_chave — NFSe por chave (E4c, G0.2a refactor) ─
     def baixar_xml_nfse_por_chave(self, chave: str,
                                    ambiente: str | None = None) -> dict:
         """Baixa XML NFSe Nacional pelo endpoint oficial FocusNFe por chave.
 
         Endpoint: GET {base_url}/v2/nfsens_recebidas/{chave}.xml
-        Headers:  Authorization Basic + Accept: application/xml
-
-        Padrao oficial FocusNFe (doc `nfsen-recebidas`). Usado como
-        fallback pelo `gov_fetch` quando `url_xml` do item nao esta
-        presente ou falha. Timeout curto (min(self._timeout, 5)) para
-        nao travar batch. Redirect 3xx trata igual `baixar_xml_nfse`:
-        o segundo GET nao envia Authorization (URL pre-assinada).
-
-        Retorno OK:  {ok, provider, xml_bruto, xml_hash_sha256, tamanho}
-        Retorno erro:{ok:False, provider, codigo, erro} — token nao vaza.
+        Refatorado em G0.2a: delega ao helper com permitir_redirect=True
+        (endpoint pode redirecionar para storage pre-assinado).
         """
         chave_s = str(chave or "").strip()
         if not chave_s:
@@ -1432,104 +1498,30 @@ class FocusNFeProvider(GovProvider):
                 "codigo":   "FOCUS_BAD_REQUEST",
                 "erro":     "chave obrigatoria.",
             }
-        try:
-            token = self._require_token()
-        except RuntimeError as exc:
-            return {
-                "ok":       False,
-                "provider": "focusnfe",
-                "codigo":   "FOCUS_TOKEN_AUSENTE",
-                "erro":     str(exc),
-            }
         base_url = self._base_url_for(ambiente)
         url = f"{base_url}/v2/nfsens_recebidas/{chave_s}.xml"
-        headers_auth = {**_basic_auth_header(token), "Accept": "application/xml"}
-        timeout_xml = min(self._timeout, 5) if self._timeout else 5
-        try:
-            resp = requests.get(url, headers=headers_auth,
-                                allow_redirects=False, timeout=timeout_xml)
-        except requests.exceptions.Timeout:
-            return {
-                "ok":       False,
-                "provider": "focusnfe",
-                "codigo":   "FOCUS_XML_TIMEOUT",
-                "erro":     f"Timeout ({timeout_xml}s) baixando XML NFSe.",
-            }
-        except requests.exceptions.RequestException as exc:
-            return {
-                "ok":       False,
-                "provider": "focusnfe",
-                "codigo":   "FOCUS_XML_ERRO",
-                "erro":     f"Erro HTTP: {type(exc).__name__}.",
-            }
-        finally:
-            del token
-            del headers_auth
-
-        # Redirect: URL pre-assinada — segundo GET SEM Authorization.
-        if resp.status_code in (301, 302, 303, 307, 308):
-            location = resp.headers.get("Location", "").strip()
-            if not location:
-                return {
-                    "ok":       False,
-                    "provider": "focusnfe",
-                    "codigo":   "FOCUS_XML_NO_LOCATION",
-                    "erro":     f"Redirect {resp.status_code} sem Location.",
-                }
-            try:
-                resp2 = requests.get(location,
-                                     headers={"Accept": "application/xml"},
-                                     allow_redirects=False, timeout=timeout_xml)
-            except requests.exceptions.RequestException as exc:
-                return {
-                    "ok":       False,
-                    "provider": "focusnfe",
-                    "codigo":   "FOCUS_XML_ERRO",
-                    "erro":     f"Erro download pre-assinado: {type(exc).__name__}.",
-                }
-            if resp2.status_code != 200:
-                return {
-                    "ok":          False,
-                    "provider":    "focusnfe",
-                    "codigo":      "FOCUS_XML_HTTP_ERROR",
-                    "erro":        f"Storage devolveu {resp2.status_code}.",
-                    "http_status": resp2.status_code,
-                }
-            body = resp2.text or ""
-        elif resp.status_code == 404:
-            return {
-                "ok":          False,
-                "provider":    "focusnfe",
-                "codigo":      "FOCUS_XML_NAO_ENCONTRADO",
-                "erro":        "XML NFSe nao encontrado no FocusNFe (404).",
-                "http_status": 404,
-            }
-        elif resp.status_code != 200:
-            return {
-                "ok":          False,
-                "provider":    "focusnfe",
-                "codigo":      "FOCUS_XML_HTTP_ERROR",
-                "erro":        f"Status HTTP inesperado ({resp.status_code}).",
-                "http_status": resp.status_code,
-            }
-        else:
-            body = resp.text or ""
-
-        if not body:
-            return {
-                "ok":       False,
-                "provider": "focusnfe",
-                "codigo":   "FOCUS_XML_VAZIO",
-                "erro":     "Corpo XML vazio.",
-            }
-        sha256 = hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()
+        res = self._http_get_xml_bytes_upstream(url, permitir_redirect=True)
+        if not res.get("ok"):
+            return res
+        body_bytes: bytes = res["xml_bytes"]
         return {
             "ok":              True,
             "provider":        "focusnfe",
-            "xml_bruto":       body,
-            "xml_hash_sha256": sha256,
-            "tamanho":         len(body),
+            "xml_bruto":       body_bytes.decode("utf-8", errors="replace"),
+            "xml_bytes":       body_bytes,
+            "xml_hash_sha256": res["xml_hash_sha256"],
+            "tamanho":         res["tamanho"],
         }
+
+    # ── baixar_xml_cte_por_chave — CT-e por chave (Fase G0.2a) ─────────
+    def baixar_xml_cte_por_chave(self, chave: str,
+                                  ambiente: str | None = None) -> dict:
+        """Baixa XML CT-e pelo endpoint oficial FocusNFe por chave.
+
+        Endpoint: GET {base_url}/v2/ctes_recebidas/{chave}.xml
+        Contrato G0.2a — bytes puros, sem redirect padrao.
+        """
+        return self.baixar_xml_bytes_por_chave("cte", chave, ambiente)
 
     # ── manifestar_nfe_recebida — evento 210210 (Fase E4b-1A) ─────────────
     def manifestar_nfe_recebida(self, chave, tipo="ciencia",

@@ -47,12 +47,14 @@ def provider_cap_menor(monkeypatch):
     return fnp.FocusNFeProvider()
 
 
-def _mock_resp(status=200, json_data=None, headers=None, text="", content=b""):
+def _mock_resp(status=200, json_data=None, headers=None, text="", content=None):
     resp = MagicMock(spec=requests.Response)
     resp.status_code = status
     resp.headers = headers or {}
     resp.text = text
-    resp.content = content
+    # G0.2a: helper interno usa resp.content. Fallback de text para content
+    # quando caller nao passar content explicito.
+    resp.content = content if content is not None else (text or "").encode("utf-8")
     if json_data is not None:
         resp.json.return_value = json_data
     else:
