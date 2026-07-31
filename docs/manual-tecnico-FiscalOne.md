@@ -1062,3 +1062,33 @@ G0.2a: **433/433** verdes na suíte completa (baseline 382 + 51 novos).
   `HTTP 400 · AMBIENTE_INVALIDO`; não existe fallback silencioso.
 - Antes de futura adoção/deploy, os hosts reais de storage retornados pela
   FocusNFe devem ser medidos e provisionados nominalmente na allowlist.
+
+### DANFSe HTML — NFS-e recebida por contrato M2M seguro (2026-07-30)
+
+Nova rota M2M `POST /fiscal/nfse/recebida/danfse` e método
+`providers/focusnfe_provider.py::baixar_danfse_nfse` — expõe a
+DANFSe HTML oficial da FocusNFe (`GET /v2/nfsens_recebidas/{chave}.html`)
+para o popup autenticado do Gerenciador Fiscal do MapOne.
+
+- Payload M2M `{chave, provider="focusnfe", ambiente, focusnfe_token}`;
+  `focusnfe_token` sanitizado antes de qualquer log.
+- Provider ≠ focusnfe → 400 `PROVIDER_NAO_SUPORTADO`; chave inválida
+  → 400 `CHAVE_INVALIDA`; token FocusNFe ausente → 400
+  `FOCUS_TOKEN_AUSENTE`.
+- Autenticação apenas na primeira origem; redirects sem Authorization
+  no segundo GET; host validado pela allowlist
+  `_xml_redirect_location_permitida`.
+- 404 upstream → 404; timeout → 504; demais falhas upstream → 502.
+- Sucesso: `HTTP 200`, body = HTML EXATO, MIME `text/html; charset=utf-8`;
+  cache `private, no-store`; nosniff.
+- Limite defensivo de 5 MiB por resposta; MIME validado; corpo vazio
+  rejeitado nominalmente.
+- Token FocusNFe **jamais** aparece em log, envelope, header ou
+  resposta.
+- Provas: 26 testes (`tests/test_danfse_nfse_focus.py`); suíte
+  integral 478 passed.
+- Limitação: prova real com FocusNFe ainda pendente — 0 NFS-e no
+  Espelho canônico do MapOne até esta data.
+
+Handoff:
+`docs/adr/_handoff/2026-07-30-danfse-html-recebida-m2m.md`.

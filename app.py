@@ -1020,6 +1020,180 @@ def xml_por_chave():
     return resp
 
 
+# ── POST /fiscal/nfse/recebida/danfse ─────────────────────────────────────────
+# DANFSe HTML da NFS-e recebida via FocusNFe. Fluxo:
+#   Browser MapOne → rota autenticada MapOne → FiscalOne (M2M) → FocusNFe.
+# FiscalOne é stateless — não persiste nada e não interpreta o HTML.
+
+
+def _status_para_codigo_danfse(codigo: str) -> int:
+    """Mapeia código do provider DANFSe → HTTP status desta rota.
+
+    401 de M2M local nunca chega aqui — a trava é aplicada antes.
+    """
+    if codigo == "DANFSE_NAO_ENCONTRADA":
+        return 404
+    if codigo == "DANFSE_TIMEOUT":
+        return 504
+    if codigo == "DANFSE_MUITO_GRANDE":
+        return 502
+    if codigo == "FOCUS_BAD_REQUEST":
+        return 400
+    if codigo == "FOCUS_TOKEN_AUSENTE":
+        return 400
+    if codigo in (
+        "DANFSE_NAO_AUTORIZADA",          # upstream 401
+        "DANFSE_REQUEST_ERROR",           # exceção de conexão
+        "DANFSE_DOWNLOAD_ERROR",          # falha no GET pré-assinado
+        "DANFSE_HTTP_ERROR",              # storage != 200
+        "DANFSE_NO_LOCATION",             # redirect sem Location
+        "DANFSE_HOST_PROIBIDO",           # redirect fora da allowlist
+        "DANFSE_UNEXPECTED_HTTP",         # status inesperado
+        "DANFSE_MIME_INESPERADO",         # Content-Type != text/html
+        "DANFSE_VAZIO",                   # upstream 200 sem body
+    ):
+        return 502
+    return 502
+
+
+@app.route("/fiscal/nfse/recebida/danfse", methods=["POST"])
+def nfse_recebida_danfse():
+    """DANFSe HTML de NFS-e recebida via FocusNFe.
+
+    Contrato M2M (X-RLogix-Service-Token constant-time), payload:
+
+        {
+          "chave":          "<identidade canônica NFS-e>",
+          "provider":       "focusnfe",
+          "ambiente":       "producao" | "homologacao",
+          "focusnfe_token": "<segredo>"
+        }
+
+    Sucesso: HTTP 200, body = HTML EXATO da FocusNFe, MIME text/html.
+    Erro: envelope JSON tipado — nunca conteúdo upstream em erro,
+    nunca token/Authorization em log, resposta ou header.
+
+    FiscalOne stateless — não persiste, não parseia, não decide fiscal.
+    """
+    trace_id      = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+
+    # 1) M2M — primeira porta.
+    ok_m2m, m2m_codigo, m2m_status = _m2m_check(request)
+    if not ok_m2m:
+        _log_stdout("nfse_recebida_danfse", "erro", trace_id,
+                    source_system=source_system, erro_msg=m2m_codigo)
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   m2m_codigo,
+            "erro":     ("Servidor sem M2M configurado."
+                         if m2m_codigo == "M2M_NAO_CONFIGURADO"
+                         else "Token M2M ausente ou invalido."),
+        }), m2m_status
+
+    # 2) Payload.
+    try:
+        payload = request.get_json(silent=True) or {}
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict) or not payload:
+        _log_stdout("nfse_recebida_danfse", "erro", trace_id,
+                    source_system=source_system, erro_msg="PAYLOAD_INVALIDO")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "PAYLOAD_INVALIDO",
+            "erro":     "Payload JSON obrigatorio.",
+        }), 400
+
+    # 3) Sanitização — POP campos sensíveis ANTES de qualquer log.
+    focusnfe_token = payload.pop("focusnfe_token", None)
+    payload.pop("Authorization", None)
+    payload.pop("authorization", None)
+    payload.pop("cert_pfx_base64", None)
+    payload.pop("cert_password", None)
+
+    chave    = str(payload.get("chave") or "").strip()
+    provider = str(payload.get("provider") or "").strip().lower()
+    ambiente = str(payload.get("ambiente") or "producao").strip().lower()
+
+    if provider != "focusnfe":
+        _log_stdout("nfse_recebida_danfse", "erro", trace_id,
+                    source_system=source_system,
+                    erro_msg=f"PROVIDER_NAO_SUPORTADO:{provider!r}")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "PROVIDER_NAO_SUPORTADO",
+            "erro":     "DANFSe HTML disponivel apenas via FocusNFe.",
+        }), 400
+
+    if not chave or len(chave) > _NFSE_IDENT_MAX or _CONTROL_CHARS_RE.search(chave):
+        _log_stdout("nfse_recebida_danfse", "erro", trace_id,
+                    source_system=source_system, erro_msg="CHAVE_INVALIDA")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "CHAVE_INVALIDA",
+            "erro":     "chave/identificador NFS-e invalido.",
+        }), 400
+
+    if not focusnfe_token:
+        _log_stdout("nfse_recebida_danfse", "erro", trace_id,
+                    source_system=source_system, erro_msg="FOCUS_TOKEN_AUSENTE")
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "FOCUS_TOKEN_AUSENTE",
+            "erro":     "Token FocusNFe obrigatorio no payload.",
+        }), 400
+
+    if ambiente not in ("producao", "homologacao"):
+        return jsonify({
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   "AMBIENTE_INVALIDO",
+            "erro":     "ambiente deve ser 'producao' ou 'homologacao'.",
+        }), 400
+
+    # 4) Chamada ao provider — token nunca aparece em log.
+    from providers.focusnfe_provider import FocusNFeProvider
+    provider_obj = FocusNFeProvider(token=focusnfe_token)
+    res = provider_obj.baixar_danfse_nfse(chave, ambiente=ambiente)
+
+    if not res.get("ok"):
+        codigo = str(res.get("codigo") or "DANFSE_UNEXPECTED_HTTP")
+        _log_stdout("nfse_recebida_danfse", "erro", trace_id,
+                    source_system=source_system, erro_msg=codigo)
+        envelope = {
+            "ok":       False,
+            "trace_id": trace_id,
+            "codigo":   codigo,
+            "erro":     str(res.get("erro") or "Falha na consulta DANFSe."),
+        }
+        if res.get("http_status") is not None:
+            envelope["http_status_upstream"] = int(res["http_status"])
+        return jsonify(envelope), _status_para_codigo_danfse(codigo)
+
+    body: bytes = res["bytes"]
+    _log_stdout("nfse_recebida_danfse", "ok", trace_id,
+                source_system=source_system, tamanho=len(body))
+    resp = app.response_class(
+        response=body,
+        status=200,
+        mimetype="text/html; charset=utf-8",
+    )
+    # Headers de segurança: nunca cache público; identifica trace.
+    resp.headers["X-Trace-Id"]               = trace_id
+    resp.headers["X-RLogix-Provider"]        = "focusnfe"
+    resp.headers["X-RLogix-Ambiente"]        = ambiente
+    resp.headers["Cache-Control"]            = "private, no-store"
+    resp.headers["X-Content-Type-Options"]   = "nosniff"
+    resp.headers["Content-Length"]           = str(len(body))
+    return resp
+
+
 # ── POST /fiscal/nfe/recebida/manifesto ───────────────────────────────────────
 
 @app.route("/fiscal/nfe/recebida/manifesto", methods=["POST"])

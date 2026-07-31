@@ -221,3 +221,37 @@ Limites preservados:
   implementado na rev.2 e continua correto).
 - Detalhes (MapOne):
   `docs/adr/_handoff/2026-07-24-focusnfe-safe-cursor.md`.
+
+- 2026-07-30 — DANFSe HTML via contrato M2M seguro. Nova rota
+
+  `POST /fiscal/nfse/recebida/danfse` + método
+
+  `providers/focusnfe_provider.py::baixar_danfse_nfse` expõem o
+
+  endpoint oficial `GET /v2/nfsens_recebidas/{chave}.html` da FocusNFe
+
+  para o popup autenticado do Gerenciador Fiscal do MapOne. Fluxo:
+
+  Browser MapOne → rota MapOne por espelho_id → FiscalOne M2M →
+
+  FocusNFe. Token FocusNFe **jamais** sai do servidor (nem em log,
+
+  envelope, header, URL, cache ou resposta). Authorization apenas na
+
+  primeira origem; redirects para storage pré-assinado nunca
+
+  reencaminham Authorization; host validado pela allowlist existente.
+
+  Limite defensivo 5 MiB; MIME `text/html` obrigatório; corpo vazio
+
+  rejeitado nominalmente. Erros nominais 400/404/502/504; provider ≠
+
+  focusnfe → 400; chave com control char rejeitada. Provas: 26 testes
+
+  (`tests/test_danfse_nfse_focus.py`); suíte integral 478 passed.
+
+  Limitação: prova real com FocusNFe pendente (0 NFS-e no Espelho
+
+  MapOne até esta data). Referência:
+
+  `docs/adr/_handoff/2026-07-30-danfse-html-recebida-m2m.md`.

@@ -1242,6 +1242,213 @@ class FocusNFeProvider(GovProvider):
             "tamanho":  len(body),
         }
 
+    # ── DANFSe HTML (NFS-e recebida — FocusNFe) ────────────────────────
+    _DANFSE_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB — defesa contra flood
+    _DANFSE_ACCEPT = "text/html"
+
+    def baixar_danfse_nfse(self, chave: str,
+                             ambiente: str | None = None) -> dict:
+        """Baixa DANFSe HTML da NFS-e recebida via FocusNFe.
+
+        Endpoint oficial:
+          ``GET {base_url}/v2/nfsens_recebidas/{chave}.html``
+
+        Fluxo (mesmo padrão de ``baixar_danfe``):
+          1. GET com Authorization Basic, ``allow_redirects=False``,
+             ``Accept: text/html``.
+          2. Redirect (301/302/303/307/308) → segundo GET SEM
+             Authorization, host validado pela allowlist
+             (:func:`_xml_redirect_location_permitida`).
+          3. 200 direto → aceita corpo.
+          4. Valida ``Content-Type`` = ``text/html`` (MIME inesperado
+             falha nominal).
+          5. Valida tamanho <= ``_DANFSE_MAX_BYTES``.
+
+        Envelope de sucesso:
+          ``{ok, provider, bytes, mime, tamanho}``
+
+        Erros nominais (nunca expõem token/detalhe de driver):
+          ``FOCUS_BAD_REQUEST`` — chave vazia.
+          ``FOCUS_TOKEN_AUSENTE`` — token não configurado.
+          ``DANFSE_REQUEST_ERROR`` — falha de conexão.
+          ``DANFSE_TIMEOUT`` — timeout.
+          ``DANFSE_NAO_ENCONTRADA`` — 404.
+          ``DANFSE_NAO_AUTORIZADA`` — 401.
+          ``DANFSE_NO_LOCATION`` — redirect sem Location.
+          ``DANFSE_HOST_PROIBIDO`` — redirect para host fora da allowlist.
+          ``DANFSE_DOWNLOAD_ERROR`` — falha no GET pré-assinado.
+          ``DANFSE_HTTP_ERROR`` — status inesperado no storage.
+          ``DANFSE_UNEXPECTED_HTTP`` — status inesperado na origem.
+          ``DANFSE_MIME_INESPERADO`` — Content-Type != text/html.
+          ``DANFSE_VAZIO`` — corpo vazio.
+          ``DANFSE_MUITO_GRANDE`` — corpo excede o limite defensivo.
+        """
+        chave = str(chave or "").strip()
+        if not chave:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_BAD_REQUEST",
+                "erro":     "chave obrigatoria.",
+            }
+        # Escape defensivo: aceita apenas caracteres seguros no path
+        # (dígitos, letras, hífen, ponto, underscore). Nunca interpola
+        # arbitrário na URL. Chaves NFS-e Nacional têm formato
+        # ``NFSe<44dígitos>`` ou variantes municipais alfanuméricas.
+        import re as _re
+        if not _re.match(r"^[A-Za-z0-9._-]{1,80}$", chave):
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_BAD_REQUEST",
+                "erro":     "chave em formato invalido.",
+            }
+        try:
+            token = self._require_token()
+        except RuntimeError as exc:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "FOCUS_TOKEN_AUSENTE",
+                "erro":     str(exc),
+            }
+        base_url = self._base_url_for(ambiente)
+        url = f"{base_url}/v2/nfsens_recebidas/{chave}.html"
+        headers_auth = {
+            **_basic_auth_header(token),
+            "Accept": self._DANFSE_ACCEPT,
+        }
+        try:
+            resp = requests.get(
+                url, headers=headers_auth, allow_redirects=False,
+                timeout=self._timeout,
+            )
+        except requests.exceptions.Timeout:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "DANFSE_TIMEOUT",
+                "erro":     f"Timeout ({self._timeout}s) ao consultar FocusNFe.",
+            }
+        except requests.exceptions.RequestException as exc:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "DANFSE_REQUEST_ERROR",
+                "erro":     f"Erro HTTP: {type(exc).__name__}.",
+            }
+
+        body: bytes | None = None
+        mime: str = ""
+
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = resp.headers.get("Location", "").strip()
+            if not location:
+                return {
+                    "ok":       False,
+                    "provider": "focusnfe",
+                    "codigo":   "DANFSE_NO_LOCATION",
+                    "erro":     f"Redirect {resp.status_code} sem Location.",
+                }
+            if not _xml_redirect_location_permitida(location, url):
+                return {
+                    "ok":       False,
+                    "provider": "focusnfe",
+                    "codigo":   "DANFSE_HOST_PROIBIDO",
+                    "erro":     "Redirect para host fora da allowlist.",
+                }
+            try:
+                # CRÍTICO: segundo GET nunca envia Authorization.
+                resp2 = requests.get(
+                    location,
+                    headers={"Accept": self._DANFSE_ACCEPT},
+                    allow_redirects=False, timeout=self._timeout,
+                )
+            except requests.exceptions.Timeout:
+                return {
+                    "ok":       False,
+                    "provider": "focusnfe",
+                    "codigo":   "DANFSE_TIMEOUT",
+                    "erro":     f"Timeout ({self._timeout}s) no download pré-assinado.",
+                }
+            except requests.exceptions.RequestException as exc:
+                return {
+                    "ok":       False,
+                    "provider": "focusnfe",
+                    "codigo":   "DANFSE_DOWNLOAD_ERROR",
+                    "erro":     f"Erro no download pré-assinado: {type(exc).__name__}.",
+                }
+            if resp2.status_code != 200:
+                return {
+                    "ok":          False,
+                    "provider":    "focusnfe",
+                    "codigo":      "DANFSE_HTTP_ERROR",
+                    "erro":        f"Storage devolveu {resp2.status_code}.",
+                    "http_status": resp2.status_code,
+                }
+            body = resp2.content
+            mime = resp2.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        elif resp.status_code == 200:
+            body = resp.content
+            mime = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        elif resp.status_code == 401:
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "DANFSE_NAO_AUTORIZADA",
+                "erro":        "Credencial rejeitada pela FocusNFe.",
+                "http_status": 401,
+            }
+        elif resp.status_code == 404:
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "DANFSE_NAO_ENCONTRADA",
+                "erro":        "Documento não encontrado na FocusNFe.",
+                "http_status": 404,
+            }
+        else:
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "DANFSE_UNEXPECTED_HTTP",
+                "erro":        f"Status HTTP inesperado ({resp.status_code}).",
+                "http_status": resp.status_code,
+            }
+
+        if body is None or len(body) == 0:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "DANFSE_VAZIO",
+                "erro":     "Resposta HTML vazia.",
+            }
+        if len(body) > self._DANFSE_MAX_BYTES:
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "DANFSE_MUITO_GRANDE",
+                "erro":     f"Resposta HTML excede o limite ({self._DANFSE_MAX_BYTES} bytes).",
+            }
+        # Aceita ``text/html`` (com ou sem charset). Origem pode omitir
+        # Content-Type em storages pré-assinados — nesse caso aplica o
+        # padrão text/html conforme header ``Accept``.
+        if mime and mime != "text/html":
+            return {
+                "ok":       False,
+                "provider": "focusnfe",
+                "codigo":   "DANFSE_MIME_INESPERADO",
+                "erro":     f"Content-Type inesperado: {mime!r}.",
+            }
+
+        return {
+            "ok":       True,
+            "provider": "focusnfe",
+            "bytes":    body,
+            "mime":     "text/html",
+            "tamanho":  len(body),
+        }
+
     # ── Helper interno comum: GET XML upstream em BYTES (Fase G0.2a) ───
     def _http_get_xml_bytes_upstream(
         self,
