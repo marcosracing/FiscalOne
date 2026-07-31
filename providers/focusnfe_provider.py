@@ -486,100 +486,198 @@ def _normalizar_servicos_nfse(raw: Any) -> dict:
     return out
 
 
-# ── Mapper NFSe Nacional (Fase E4c) ───────────────────────────────────────────
+# ── Mapper NFSe Nacional (Fase E4c · reconciliação 2026-07-31) ────────────────
+#
+# CONTRATO OFICIAL da listagem `GET /v2/nfsens_recebidas`
+# (https://doc.focusnfe.com.br/reference/consultar_nfsen_recebidas):
+#
+#   - `chave_nfse` (string opaca — identidade do documento);
+#   - `situacao` (textual): "autorizado" | "cancelado" | "substituido";
+#   - `nome_prestador`, `documento_prestador` (planos, no root);
+#   - `nome_tomador`, `documento_tomador` (planos, no root);
+#   - `valor_total` (root);
+#   - `data_emissao`, `data_geracao` (root);
+#   - `versao` (int incremental — cursor opaco);
+#   - opcionais: `data_cancelamento`, `chave_nfse_substituida`,
+#                `numero`, `serie`, `codigo_verificacao`, `competencia`.
+#
+# O contrato oficial NÃO usa: `chave` como nome principal, `status`
+# numérico exclusivamente, `prestador`/`tomador`/`servicos` aninhados
+# obrigatoriamente, `url_xml` obrigatória. Layouts históricos com esse
+# formato são aceitos por um adaptador EXPLÍCITO (documentado e testado)
+# — nunca por leitura silenciosa mista.
+#
+# Ausência de `chave_nfse` **ou** de `versao` levanta ValueError — o
+# consumidor (gov_fetch pré-mapper) trata como erro nominal por
+# documento e bloqueia o cursor antes do item, sem perder posteriores.
+# Situação desconhecida também levanta — nunca é convertida em
+# "autorizado".
+_SITUACAO_NFSE_MAP = {
+    # oficial textual → (situacao_canonica, cancelado, substituido)
+    "autorizado":  ("autorizada",  0, 0),
+    "autorizada":  ("autorizada",  0, 0),
+    "cancelado":   ("cancelada",   1, 0),
+    "cancelada":   ("cancelada",   1, 0),
+    "substituido": ("substituida", 0, 1),
+    "substituída": ("substituida", 0, 1),
+    "substituida": ("substituida", 0, 1),
+}
+
+# Adaptador legacy — `status` numérico do layout histórico. Nunca é
+# tratado como contrato oficial; só existe para não perder documentos
+# de payloads antigos que ainda estejam em trânsito.
+_SITUACAO_NFSE_STATUS_INT = {
+    1: "autorizado",
+    2: "cancelado",
+    3: "substituido",
+}
+
+
+def _digitos_documento(v: Any) -> str:
+    """Retorna apenas os dígitos de `v` (para CNPJ/CPF)."""
+    import re as _re
+    return _re.sub(r"\D", "", str(v or ""))
+
+
 def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
-    """Mapeia item Focus (schema `NfseRecebida`) para dict compativel com
-    MapOne. Contrato distinto do NF-e: NFSe nao tem chave DFe 44 digitos,
-    nao usa cStat SEFAZ, e o XML vem via URL separada (`url_xml`).
+    """Mapeia item da listagem `/v2/nfsens_recebidas` (contrato oficial
+    FocusNFe) para dict canônico consumido pelo MapOne.
 
-    Campos criticos do item Focus:
-      - chave (string opaca — nao validar DV)
-      - status (int): 1 autorizado | 2 cancelado | 3 substituido
-      - prestador/tomador: dicts com cpf/cnpj + razao_social
-      - servicos: dict com valor_servicos, valor_iss, iss_retido,
-                  valor_liquido, discriminacao
-      - versao (int — cursor incremental)
-      - url_xml (opcional — se presente, `gov_fetch` baixa)
+    Preferência estrita pelo contrato oficial:
+      - `chave_nfse` como identidade;
+      - `situacao` textual como fonte de estado;
+      - campos planos `nome_prestador`/`documento_prestador`/
+        `valor_total`/`data_emissao`/`data_geracao` no root.
 
-    NUNCA inclui Authorization/token. Preserva `raw_json_focus` sanitizado.
+    Adaptador legacy explícito (sinalizado em `_layout_focus`):
+      - `chave` como identidade;
+      - `status` numérico (1/2/3) traduzido para situação textual;
+      - dicts aninhados `prestador`/`tomador`/`servicos`.
+
+    Nunca inventa situação. Nunca decodifica payload fiscal para
+    reconstruir Espelho. `raw_json_focus` é sanitizado (sem token).
     """
     if not isinstance(item, dict):
         raise ValueError(f"item nao e dict: {type(item).__name__}")
 
-    chave = _get_str(item, "chave")
+    # ── Identidade (chave_nfse é o nome oficial) ──────────────────────
+    chave = _get_str(item, "chave_nfse")
+    layout = "oficial"
     if not chave:
-        raise ValueError("chave NFSe ausente no item Focus")
+        chave = _get_str(item, "chave", "chNFe", "chave_nfe")
+        if chave:
+            layout = "legacy"
+    if not chave:
+        raise ValueError("chave_nfse ausente no item Focus (nem chave legacy)")
 
-    status_raw = item.get("status")
-    try:
-        status_int = int(status_raw) if status_raw is not None else 1
-    except (TypeError, ValueError):
-        status_int = 1
+    # ── Versão (cursor opaco — obrigatória por doc) ───────────────────
+    # `_versao_focus_valida` já é a decisão canônica de "versão válida";
+    # aqui rejeitamos antes de qualquer default silencioso para 0.
+    versao_valida = _versao_focus_valida(item.get("versao"))
+    if versao_valida is None:
+        raise ValueError("versao FocusNFe ausente/invalida no item NFS-e")
+    versao = versao_valida
 
-    if status_int == 2:
-        situacao_nfse, cancelado_r, substituido_r = "cancelada", 1, 0
-    elif status_int == 3:
-        situacao_nfse, cancelado_r, substituido_r = "substituida", 0, 1
-    else:
-        situacao_nfse, cancelado_r, substituido_r = "autorizada", 0, 0
+    # ── Situação (textual oficial preferida; adaptador legacy explícito)
+    situacao_raw = _get_str(item, "situacao").strip().lower()
+    if not situacao_raw:
+        status_int_raw = item.get("status")
+        if status_int_raw is not None:
+            try:
+                si = int(status_int_raw)
+                situacao_raw = _SITUACAO_NFSE_STATUS_INT.get(si, "")
+                if situacao_raw:
+                    layout = "legacy"
+            except (TypeError, ValueError):
+                situacao_raw = ""
+    if not situacao_raw:
+        raise ValueError(
+            "situacao NFS-e ausente no item Focus (nem status legacy)"
+        )
+    mapa_sit = _SITUACAO_NFSE_MAP.get(situacao_raw)
+    if mapa_sit is None:
+        # NUNCA convertemos situação desconhecida em "autorizado" — o
+        # consumidor precisa saber que o documento veio com estado
+        # que não corresponde ao contrato oficial.
+        raise ValueError(f"situacao NFS-e desconhecida: {situacao_raw!r}")
+    situacao_nfse, cancelado_r, substituido_r = mapa_sit
 
-    prestador = item.get("prestador") if isinstance(item.get("prestador"), dict) else {}
-    tomador   = item.get("tomador")   if isinstance(item.get("tomador"),   dict) else {}
-    # `servicos` pode vir como dict (comportamento legado) OU list de objetos
-    # (schema oficial FocusNFe). Normaliza para dict antes de acessar campos.
-    # Sem essa normalizacao, listas eram descartadas e todos os campos
-    # financeiros/fiscais viravam vazios silenciosamente.
-    servicos = _normalizar_servicos_nfse(item.get("servicos"))
+    # ── Prestador / Tomador (planos no oficial; aninhados no legacy) ──
+    # Prioridade oficial: `nome_prestador`, `documento_prestador`,
+    # `nome_tomador`, `documento_tomador` no root. Se ausentes, tenta
+    # adaptador aninhado.
+    prest_doc = _digitos_documento(
+        _get_str(item, "documento_prestador", "cnpj_prestador",
+                 "cpf_prestador")
+    )
+    prest_nome = _get_str(item, "nome_prestador", "razao_social_prestador")
+    prest_ie   = _get_str(item, "inscricao_municipal_prestador")
+    prestador_aninh = item.get("prestador") if isinstance(item.get("prestador"), dict) else {}
+    if not prest_doc:
+        d = str(prestador_aninh.get("cnpj") or prestador_aninh.get("cpf")
+                or prestador_aninh.get("cpf_cnpj") or "")
+        prest_doc = _digitos_documento(d)
+        if prest_doc:
+            layout = "legacy"
+    if not prest_nome:
+        prest_nome = _get_str(prestador_aninh, "razao_social", "nome_fantasia")
+    if not prest_ie:
+        prest_ie = _get_str(prestador_aninh, "inscricao_municipal")
+    prest_tipo = "cnpj" if len(prest_doc) > 11 else ("cpf" if prest_doc else "")
 
-    def _doc_e_tipo(entidade: dict) -> tuple[str, str]:
-        """Extrai (documento_digitos, tipo). Aceita `cnpj` ou `cpf`."""
-        cnpj = str(entidade.get("cnpj") or "").strip()
-        if cnpj:
-            return _get_str({"v": cnpj}, "v"), "cnpj"
-        cpf = str(entidade.get("cpf") or "").strip()
-        if cpf:
-            return _get_str({"v": cpf}, "v"), "cpf"
-        # Documento pode vir consolidado em `cpf_cnpj`
-        cc = str(entidade.get("cpf_cnpj") or "").strip()
-        if cc:
-            tipo_h = "cpf" if len(cc) <= 11 else "cnpj"
-            return cc, tipo_h
-        return "", ""
+    tom_doc = _digitos_documento(
+        _get_str(item, "documento_tomador", "cnpj_tomador", "cpf_tomador")
+    )
+    tom_nome = _get_str(item, "nome_tomador", "razao_social_tomador")
+    tomador_aninh = item.get("tomador") if isinstance(item.get("tomador"), dict) else {}
+    if not tom_doc:
+        d = str(tomador_aninh.get("cnpj") or tomador_aninh.get("cpf")
+                or tomador_aninh.get("cpf_cnpj") or "")
+        tom_doc = _digitos_documento(d)
+        if tom_doc:
+            layout = "legacy"
+    if not tom_nome:
+        tom_nome = _get_str(tomador_aninh, "razao_social")
+    tom_tipo = "cnpj" if len(tom_doc) > 11 else ("cpf" if tom_doc else "")
 
-    prest_doc, prest_tipo = _doc_e_tipo(prestador)
-    tom_doc,   tom_tipo   = _doc_e_tipo(tomador)
+    # ── Valores / metadados (root oficial; adaptador aninhado) ────────
+    v_total = _get_str(item, "valor_total", "valor_liquido_nfse")
+    servicos_aninh = _normalizar_servicos_nfse(item.get("servicos"))
+    v_servicos = _get_str(servicos_aninh, "valor_servicos") if servicos_aninh else ""
+    v_iss = _get_str(item, "valor_iss") or _get_str(servicos_aninh, "valor_iss")
+    v_liquido = _get_str(item, "valor_liquido") or _get_str(servicos_aninh, "valor_liquido")
+    if v_servicos and not v_total:
+        v_total = v_servicos
+        layout = "legacy"
 
-    # Normaliza documentos para so digitos (mesmo padrao do _mapear_nfe_focus)
-    import re as _re
-    prest_doc = _re.sub(r"\D", "", prest_doc)
-    tom_doc   = _re.sub(r"\D", "", tom_doc)
+    iss_retido = _normalizar_iss_retido_nfse(
+        item.get("iss_retido") if item.get("iss_retido") is not None
+        else servicos_aninh.get("iss_retido")
+    )
+    discriminacao = (_get_str(item, "discriminacao")
+                     or _get_str(servicos_aninh, "discriminacao"))
+    item_lista_servico = (_get_str(item, "item_lista_servico")
+                          or _get_str(servicos_aninh, "item_lista_servico"))
+    codigo_cnae = (_get_str(item, "codigo_cnae")
+                   or _get_str(servicos_aninh, "codigo_cnae"))
 
-    versao_raw = item.get("versao") or 0
-    try:
-        versao = int(versao_raw)
-    except (TypeError, ValueError):
-        versao = 0
+    # ── Datas — contrato oficial expõe `data_emissao` e `data_geracao`
+    dh_emi     = _get_str(item, "data_emissao")
+    dh_geracao = _get_str(item, "data_geracao")
 
-    v_servicos    = _get_str(servicos, "valor_servicos")
-    v_iss         = _get_str(servicos, "valor_iss")
-    v_liquido     = _get_str(servicos, "valor_liquido")
-    # iss_retido normalizado para bool. Antes era string via _get_str, o que
-    # deixava "False" (truthy) causar leitura errada em consumidores. Agora
-    # aceita bool/int/float/string (ver `_normalizar_iss_retido_nfse`).
-    iss_retido    = _normalizar_iss_retido_nfse(servicos.get("iss_retido"))
-    discriminacao = _get_str(servicos, "discriminacao")
-    item_lista_servico = _get_str(servicos, "item_lista_servico")
-    codigo_cnae   = _get_str(servicos, "codigo_cnae")
-
-    dh_emi = _get_str(item, "data_emissao")
+    # ── Campos de cancelamento e substituição opcionais ───────────────
+    data_cancel  = _get_str(item, "data_cancelamento")
+    chave_subst  = _get_str(item, "chave_nfse_substituida", "chave_substituida")
 
     doc = {
         "ok":              True,
         "type":            "nfse",
         "doc_type":        "nfse",
         "trace_id":        trace_id,
+        # Identidade opaca — publica os três nomes (oficial + compat).
+        "chave_nfse":      chave,
         "chave":           chave,
-        "chNFe":           chave,           # compat com consumers que leem chNFe
+        "chNFe":           chave,
         "numero":          _get_str(item, "numero"),
         "serie":           _get_str(item, "serie"),
         "codigo_verificacao": _get_str(item, "codigo_verificacao"),
@@ -588,16 +686,17 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
         # Prestador → emit_* (fornecedor da NFSe recebida).
         "emit_cnpj":       prest_doc,
         "emit_doc_tipo":   prest_tipo,
-        "emit_nome":       _get_str(prestador, "razao_social", "nome_fantasia"),
-        "emit_ie":         _get_str(prestador, "inscricao_municipal"),
+        "emit_nome":       prest_nome,
+        "emit_ie":         prest_ie,
         # Tomador → dest_* (tenant nesta fase — NFSe recebida).
         "dest_cnpj":       tom_doc,
         "dest_doc_tipo":   tom_tipo,
-        "dest_nome":       _get_str(tomador, "razao_social"),
+        "dest_nome":       tom_nome,
         # Datas / valores.
         "dh_emi":          dh_emi,
         "dh_emi_utc":      dh_emi[:19] if dh_emi else "",
-        "valor_total":     v_servicos,
+        "data_geracao":    dh_geracao,
+        "valor_total":     v_total,
         "valor_iss":       v_iss,
         "valor_liquido":   v_liquido,
         "iss_retido":      iss_retido,
@@ -608,14 +707,19 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
         # Status/situacao NFSe — nao usar cStat SEFAZ.
         "status_xml":      "RESUMO",         # promovido a COMPLETO pelo gov_fetch
         "situacao_nfse":   situacao_nfse,
+        "situacao_focus":  situacao_raw,     # textual bruta (autorizado etc.)
         "cancelado":       cancelado_r,
         "substituido":     substituido_r,
+        "data_cancelamento":       data_cancel,
+        "chave_nfse_substituida":  chave_subst,
         "url_xml":         _get_str(item, "url_xml"),
         # Rastreabilidade / persistencia.
         "import_origin":   "fiscalone_focusnfe_nfse",
         "status_sefaz":    "focusnfe",
         "parser_version":  "focus_nfse_v1",
         "raw_json_focus":  _dump_focus_json(item),
+        # Sinaliza se o adaptador legacy foi acionado — apenas telemetria.
+        "_layout_focus":   layout,
     }
     return doc
 
@@ -1622,6 +1726,46 @@ class FocusNFeProvider(GovProvider):
                 "provider": "focusnfe",
                 "codigo":   "FOCUS_XML_VAZIO",
                 "erro":     "Focus devolveu corpo vazio para XML.",
+            }
+        # 2026-07-31 — corpo não XML nunca é persistido como XML.
+        # Content-Type explicitamente HTML/JSON/texto rejeita nominal;
+        # o primeiro byte também vira sanity check contra HTML sem
+        # header (ex.: proxy respondendo <html>).
+        upstream_resp = resp2 if permitir_redirect and status in (
+            301, 302, 303, 307, 308) else resp
+        ct_raw = ""
+        try:
+            ct_raw = str(upstream_resp.headers.get("Content-Type") or "").lower()
+        except Exception:  # pragma: no cover — defensivo
+            ct_raw = ""
+        ct = ct_raw.split(";")[0].strip()
+        # Aceita: application/xml, text/xml, application/*+xml, ou
+        # ausência (algumas storages pré-assinadas omitem).
+        aceito = (
+            not ct
+            or ct == "application/xml"
+            or ct == "text/xml"
+            or ct.startswith("application/")
+            and ct.endswith("+xml")
+        )
+        if not aceito:
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "FOCUS_XML_CONTENT_TYPE_INVALIDO",
+                "erro":        "Corpo do endpoint XML não é XML.",
+                "http_status": upstream_status,
+            }
+        # Sanity check leve — se começa com <html/<HTML mesmo sem
+        # Content-Type, rejeita (proxy erro típico).
+        prefix = body_bytes[:16].lstrip().lower()
+        if prefix.startswith(b"<html") or prefix.startswith(b"<!doctype html"):
+            return {
+                "ok":          False,
+                "provider":    "focusnfe",
+                "codigo":      "FOCUS_XML_CONTENT_TYPE_INVALIDO",
+                "erro":        "Corpo do endpoint XML aparenta ser HTML.",
+                "http_status": upstream_status,
             }
         sha = hashlib.sha256(body_bytes).hexdigest()
         return {

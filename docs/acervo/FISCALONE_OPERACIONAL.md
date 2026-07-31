@@ -255,3 +255,23 @@ Limites preservados:
   MapOne até esta data). Referência:
 
   `docs/adr/_handoff/2026-07-30-danfse-html-recebida-m2m.md`.
+
+## NFS-e recebida — contrato oficial FocusNFe (2026-07-31)
+
+`_mapear_nfse_focus` foi reconciliado ao contrato oficial atual da
+Focus (`chave_nfse`, `situacao` textual, campos planos no root,
+`X-Max-Version`/`X-Total-Count`). Adaptador legacy explícito marca
+`_layout_focus="legacy"`. Situação desconhecida levanta erro nominal
+— nunca vira "autorizado" silenciosamente. Ausência de `chave_nfse`
+ou `versao` bloqueia o cursor antes do item. Corpo não-XML no
+endpoint `/v2/nfsens_recebidas/{chave}.xml` retorna
+`FOCUS_XML_CONTENT_TYPE_INVALIDO`. Isolamento NF-e × NFS-e provado
+por endpoints, mappers, doc_type e cursor separados. Prova
+operacional (2026-07-31 20:18): transporte NFS-e OK (`SEM_DOCUMENTO`
+para tenants 1 e 2, cursor "0"→"0"); mapper com payload real NÃO
+COMPROVADO — sem NFS-e no ATP. Timer `mapone-dfe-sync.timer` segue
+`enabled/inactive` por decisão operacional anterior; unit files
+íntegros no repositório (`dev/systemd/`). Sem deploy nesta rodada.
+Sem restart. Sem ativação do timer.
+
+Handoff: `docs/adr/_handoff/2026-07-31-focusnfe-nfse-contrato-oficial.md`.

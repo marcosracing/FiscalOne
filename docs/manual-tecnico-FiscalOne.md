@@ -602,11 +602,13 @@ Handoff: `docs/adr/_handoff/2026-07-17-fase-e4a-mapper-schema-real-focus.md`.
 
 ## Fase E4c · NFSe Nacional Recebidas via FocusNFe (2026-07-17)
 
+> **Retificação 2026-07-31.** Esta seção descrevia o mapper antigo (`chave`, `status` numérico, campos aninhados obrigatórios) como se fosse contrato oficial. Não é. O contrato oficial atual da Focus para `GET /v2/nfsens_recebidas` usa `chave_nfse`, `situacao` textual e campos planos no root. Ver seção **NFS-e recebida — contrato oficial (2026-07-31)** abaixo e handoff `2026-07-31-focusnfe-nfse-contrato-oficial.md`. O layout descrito adiante permanece aceito **apenas** como adaptador legacy explícito (sinalizado por `_layout_focus="legacy"` no dict devolvido).
+
 Estende `FocusNFeProvider` para NFSe Nacional recebida (tenant = tomador). ADN NFSe **não é tocada**. NFSe emitida/receita fica fora.
 
 **Rota + parâmetros** (`providers/focusnfe_provider.py:340-378`): `tipo="nfse"` habilitado; URL `/v2/nfsens_recebidas`; `params["completa"]="1"` só para NFSe. Cursor `versao` reusado.
 
-**Mapper** (`_mapear_nfse_focus`, `providers/focusnfe_provider.py:284-402`): contrato dedicado ao schema `NfseRecebida`. **Sem cStat SEFAZ**, **sem validação DV DFe 44**. Emite `situacao_nfse ∈ {autorizada, cancelada, substituida}` a partir de `status ∈ {1,2,3}`. Prestador → `emit_*` (fornecedor); tomador → `dest_*` (tenant). `servicos.valor_servicos` → `valor_total`. `import_origin = "fiscalone_focusnfe_nfse"` (dedicado — distingue de NF-e). `status_sefaz = "focusnfe"`.
+**Mapper (layout legacy)** (`_mapear_nfse_focus`, `providers/focusnfe_provider.py:284-402`): contrato dedicado ao schema `NfseRecebida` na forma histórica. **Sem cStat SEFAZ**, **sem validação DV DFe 44**. Emite `situacao_nfse ∈ {autorizada, cancelada, substituida}` a partir de `status ∈ {1,2,3}`. Prestador → `emit_*` (fornecedor); tomador → `dest_*` (tenant). `servicos.valor_servicos` → `valor_total`. `import_origin = "fiscalone_focusnfe_nfse"` (dedicado — distingue de NF-e). `status_sefaz = "focusnfe"`.
 
 **XML via `url_xml`** (`baixar_xml_nfse`, `providers/focusnfe_provider.py:901-1024`): URL vem do próprio item (não é rota construída). `Authorization: Basic + Accept: application/xml`, timeout `min(self._timeout, 5)`. Se 3xx → segundo GET **sem Authorization** (URL pré-assinada — padrão análogo ao DANFE). Códigos: `FOCUS_XML_NAO_ENCONTRADO`, `FOCUS_XML_HTTP_ERROR`, `FOCUS_XML_NO_LOCATION`, `FOCUS_XML_TIMEOUT`, `FOCUS_XML_ERRO`, `FOCUS_XML_VAZIO`.
 
@@ -1092,3 +1094,66 @@ para o popup autenticado do Gerenciador Fiscal do MapOne.
 
 Handoff:
 `docs/adr/_handoff/2026-07-30-danfse-html-recebida-m2m.md`.
+
+---
+
+## NFS-e recebida — contrato oficial FocusNFe (2026-07-31)
+
+**Vinculante:**
+- <https://doc.focusnfe.com.br/reference/consultar_nfsen_recebidas>
+- <https://doc.focusnfe.com.br/reference/consultar_nfsen_recebida_individual_xml>
+
+`_mapear_nfse_focus` (`providers/focusnfe_provider.py:489-701`) foi
+reconciliado com o contrato oficial da listagem `GET
+/v2/nfsens_recebidas`:
+
+- identidade **`chave_nfse`** (não `chave`);
+- **`situacao` textual** (`autorizado`/`cancelado`/`substituido`) —
+  situação desconhecida levanta `ValueError` nominal (nunca converte
+  para "autorizado" silenciosamente);
+- campos **planos no root** para prestador/tomador (`nome_prestador`,
+  `documento_prestador`, `nome_tomador`, `documento_tomador`,
+  `valor_total`, `valor_iss`, `valor_liquido`, `data_emissao`,
+  `data_geracao`);
+- opcionais `data_cancelamento`, `chave_nfse_substituida`;
+- `versao` como cursor opaco — obrigatória por documento;
+  `_versao_focus_valida` decide "válida" (int > 0 ou str dígito > 0).
+
+**Adaptador legacy explícito**: quando o payload chega no formato
+histórico (`chave`, `status` numérico, aninhados `prestador`/
+`tomador`/`servicos`), o mapper aceita e marca `_layout_focus="legacy"`
+no dict devolvido. Nunca é misturado silenciosamente com o oficial.
+
+**XML canônico** (`baixar_xml_nfse_por_chave`, linhas 1793-1821): `GET
+{base_url}/v2/nfsens_recebidas/{chave}.xml`. `url_xml` do item da
+listagem continua sendo aceito como acelerador, mas o fallback pelo
+endpoint oficial garante recuperação quando ausente.
+
+**Rejeição de corpo não-XML** (`_http_get_xml_bytes_upstream`, novo
+bloco linhas 1723-1770): `Content-Type` HTML/JSON/texto ou prefixo
+`<html`/`<!doctype html` (proxy respondendo HTML) retorna
+`FOCUS_XML_CONTENT_TYPE_INVALIDO` — nunca persistido como XML.
+
+**Cancelada/substituída**: XML **não é baixado** para essas situações
+(comportamento pré-existente preservado). O consumidor persiste
+evento/estado nominal a partir dos metadados da listagem; nenhum
+Espelho válido é fabricado a partir do resumo.
+`chave_nfse_substituida` é preservada quando fornecida.
+
+**Isolamento NF-e × NFS-e**: mapper NF-e (`_mapear_nfe_focus`) não
+escreve `chave_nfse` nem `situacao_nfse` — evita cross-contamination
+downstream. Endpoints separados (`/v2/nfes_recebidas` × `/v2/nfsens_recebidas`)
+via dispatch por `tipo` em `gov_fetch`. Cursor `versao` string opaca
+por doc_type; execução NFS-e não altera cursor NF-e (e vice-versa).
+
+**Cursor seguro**: `X-Max-Version`/`X-Total-Count` são consumidos mas
+não são fonte única; `cursor_seguro` bloqueia antes da menor versão
+com pendência ou erro (`menor_versao_pendente_ou_erro`); em falha
+temporária (400/429/5xx/timeout/HTML), cursor **não avança**.
+
+**Testes**: `tests/test_focusnfe_nfse_contrato_oficial.py` (34 provas
+cobrindo os 25 requisitos §8 do prompt de correção). Regressão focada
+Focus verde (267/267). Suíte integral FiscalOne verde (512/512). Gate
+ADR-0046 MapOne+CtrlOne verde.
+
+Handoff: `docs/adr/_handoff/2026-07-31-focusnfe-nfse-contrato-oficial.md`.
