@@ -673,7 +673,17 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
         _get_str(item, "documento_prestador", "cnpj_prestador",
                  "cpf_prestador")
     )
-    prest_nome = _get_str(item, "nome_prestador", "razao_social_prestador")
+    # O layout DPS Nacional observado pela Focus identifica o prestador por
+    # ``cnpj_prestador``, mas publica sua razão social em
+    # ``razao_social_emitente``.  Não confundir com o tomador: o emitente da
+    # NFS-e é o prestador do serviço.
+    prest_nome = _get_str(
+        item,
+        "nome_prestador",
+        "razao_social_prestador",
+        "razao_social_emitente",
+        "nome_fantasia_emitente",
+    )
     prest_ie   = _get_str(item, "inscricao_municipal_prestador")
     prestador_aninh = item.get("prestador") if isinstance(item.get("prestador"), dict) else {}
     if not prest_doc:

@@ -323,3 +323,7 @@ Timer `mapone-dfe-sync.timer` **permanece inactive** por decisão
 operacional anterior; MapOne e CtrlOne **não sofreram alteração de
 código**. Handoff:
 `docs/adr/_handoff/2026-07-31-focusnfe-nfse-dps-nacional.md`.
+## 2026-08-01 — Alias de razão social do prestador NFS-e
+
+Adicionado fallback nominal `razao_social_emitente`/`nome_fantasia_emitente`
+para `emit_nome` no mapper DPS Nacional, comprovado por teste sintético.

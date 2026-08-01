@@ -704,6 +704,15 @@ class TestLayoutDpsNacional:
         # discriminacao via descricao_servico
         assert d["discriminacao"] == "Servico teste DPS"
 
+    def test_dps_nome_do_prestador_vem_do_emitente_quando_focus_nao_traz_alias(self):
+        item = _item_dps()
+        item.pop("razao_social_prestador")
+        item.pop("nome_prestador", None)
+        item["razao_social_emitente"] = "Emitente Real do DPS LTDA"
+        d = _mapear_nfse_focus(item, "trace-dps-emitente")
+        assert d["emit_cnpj"] == CNPJ_SINTETICO
+        assert d["emit_nome"] == "Emitente Real do DPS LTDA"
+
     def test_dps_identidade_fallback_id_dps(self):
         item = _item_dps()
         del item["numero_dfse"]

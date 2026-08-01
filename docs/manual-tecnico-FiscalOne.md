@@ -1224,3 +1224,9 @@ da Focus mascare documentos válidos como ausência de nota.
 
 Handoff:
 `docs/adr/_handoff/2026-07-31-focusnfe-nfse-dps-nacional.md`.
+## 2026-08-01 — Prestador no layout DPS Nacional
+
+No layout DPS observado, `cnpj_prestador` identifica o prestador e sua razão
+social pode ser publicada como `razao_social_emitente`. O mapper NFS-e converte
+esse campo para `emit_nome`, preservando a prioridade dos aliases explícitos de
+prestador e sem confundir o emitente/prestador com o tomador.
