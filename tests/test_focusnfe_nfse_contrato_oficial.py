@@ -623,6 +623,153 @@ class TestXmlComoFonteCanonica:
 # ─────────────────────────────────────────────────────────────────────
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Layout DPS Nacional 2026 (real — descoberto por prova operacional
+# 2026-07-31; a doc pública descreve o layout municipal legado)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _item_dps(**overrides):
+    """Item da listagem no layout REAL da FocusNFe 2026 (DPS Nacional
+    NFS-e). Todos os campos são sintéticos — nenhum dado de cliente."""
+    base = {
+        "id_dps":                    "dps-00000000000-000001",
+        "numero_dfse":               "35202607000000000000000000000000000000000042",
+        "numero_dps":                "1",
+        "serie_dps":                 "1",
+        "numero":                    "1001",
+        "versao":                    42,
+        "versao_nfse":               "1.00",
+        "versao_dps":                "1.00",
+        "versao_aplicacao_dps":      "1.00",
+        "versao_aplicacao_nfse":     "1.00",
+        "cnpj_prestador":            CNPJ_SINTETICO,
+        "razao_social_prestador":    "Prestador DPS Sintetico LTDA",
+        "inscricao_municipal_prestador": "1234567",
+        "cnpj_tomador":              CNPJ_SINTETICO,
+        "razao_social_tomador":      "Tomador DPS Sintetico",
+        "cnpj_emitente":             CNPJ_SINTETICO,
+        "razao_social_emitente":     "Prestador DPS Sintetico LTDA",
+        "valor_servico":             "1500.00",
+        "valor_liquido":             "1425.00",
+        "iss_valor":                 "75.00",
+        "iss_aliquota":              "5.00",
+        "data_emissao":              "2026-07-15T10:00:00-03:00",
+        "data_processo":             "2026-07-15T10:05:00-03:00",
+        "data_competencia":          "2026-07-01",
+        "descricao_servico":         "Servico teste DPS",
+        "codigo_municipio_prestacao": "3550308",
+        "codigo_tributacao_nacional_iss": "01.01",
+    }
+    base.update(overrides)
+    return base
+
+
+class TestLayoutDpsNacional:
+    def test_dps_autorizado_por_default(self):
+        d = _mapear_nfse_focus(_item_dps(), "trace-dps-1")
+        assert d["_layout_focus"] == "dps_nacional"
+        assert d["situacao_nfse"] == "autorizada"
+        assert d["cancelado"] == 0
+        assert d["substituido"] == 0
+        # Identidade opaca via numero_dfse
+        assert d["chave_nfse"] == "35202607000000000000000000000000000000000042"
+        # Prestador/tomador extraídos dos campos planos DPS
+        assert d["emit_cnpj"] == CNPJ_SINTETICO
+        assert d["emit_nome"] == "Prestador DPS Sintetico LTDA"
+        assert d["dest_cnpj"] == CNPJ_SINTETICO
+        assert d["dest_nome"] == "Tomador DPS Sintetico"
+        # Valores DPS
+        assert d["valor_total"] == "1500.00"
+        assert d["valor_iss"] == "75.00"
+        assert d["valor_liquido"] == "1425.00"
+        # Datas — data_processo vira data_geracao
+        assert d["dh_emi"].startswith("2026-07-15")
+        assert d["data_geracao"].startswith("2026-07-15")
+        # Numero/serie DPS
+        assert d["numero"] == "1001"
+        assert d["serie"] == "1"
+        assert d["competencia"] == "2026-07-01"
+        # discriminacao via descricao_servico
+        assert d["discriminacao"] == "Servico teste DPS"
+
+    def test_dps_identidade_fallback_id_dps(self):
+        item = _item_dps()
+        del item["numero_dfse"]
+        d = _mapear_nfse_focus(item, "trace-dps-2")
+        assert d["_layout_focus"] == "dps_nacional"
+        assert d["chave_nfse"] == item["id_dps"]
+
+    def test_dps_cancelado_por_data_cancelamento(self):
+        d = _mapear_nfse_focus(_item_dps(
+            data_cancelamento="2026-07-16T08:00:00-03:00",
+        ), "trace-dps-3")
+        assert d["_layout_focus"] == "dps_nacional"
+        assert d["situacao_nfse"] == "cancelada"
+        assert d["cancelado"] == 1
+
+    def test_dps_substituido_por_chave_substituida(self):
+        d = _mapear_nfse_focus(_item_dps(
+            chave_nfse_substituida="B" * 44,
+        ), "trace-dps-4")
+        assert d["_layout_focus"] == "dps_nacional"
+        assert d["situacao_nfse"] == "substituida"
+        assert d["substituido"] == 1
+        assert d["chave_nfse_substituida"] == "B" * 44
+
+    def test_dps_sem_identidade_rejeita(self):
+        item = _item_dps()
+        del item["numero_dfse"]
+        del item["id_dps"]
+        with pytest.raises(ValueError) as e:
+            _mapear_nfse_focus(item, "trace-x")
+        assert "identidade NFS-e ausente" in str(e.value)
+
+    def test_dps_sem_versao_rejeita(self):
+        item = _item_dps()
+        del item["versao"]
+        with pytest.raises(ValueError):
+            _mapear_nfse_focus(item, "trace-x")
+
+
+class TestFailClosedClassifierMapper:
+    """Se o upstream devolveu itens mas o mapper rejeitou todos, a
+    classificação NUNCA pode ser SEM_DOCUMENTO — o consumidor precisa
+    saber que houve erro e não avançar cursor."""
+
+    def test_classificador_erro_quando_todos_itens_rejeitados(self):
+        from app import _classificar_acao_gov_fetch
+        result = {
+            "quantidade_retornada":   100,
+            "recebidos_da_focus":     100,
+            "documentos_mapeados":    0,
+            "erros_de_mapeamento":    100,
+            "erros":                  [{"codigo": "FOCUS_ITEM_INVALIDO"}] * 100,
+        }
+        assert _classificar_acao_gov_fetch(result, docs_count=0) == "ERRO"
+
+    def test_classificador_documentos_quando_ha_docs_mesmo_com_erros(self):
+        from app import _classificar_acao_gov_fetch
+        result = {
+            "quantidade_retornada":   3,
+            "documentos_mapeados":    2,
+            "erros_de_mapeamento":    1,
+            "erros":                  [{"codigo": "FOCUS_ITEM_INVALIDO"}],
+        }
+        assert _classificar_acao_gov_fetch(result, docs_count=2) == "DOCUMENTOS"
+
+    def test_classificador_sem_documento_quando_upstream_vazio(self):
+        from app import _classificar_acao_gov_fetch
+        result = {
+            "quantidade_retornada":   0,
+            "documentos_mapeados":    0,
+            "erros_de_mapeamento":    0,
+            "erros":                  [],
+        }
+        # Vazio legítimo — sem documentos vindo da Focus.
+        assert _classificar_acao_gov_fetch(result, docs_count=0) == "SEM_DOCUMENTO"
+
+
 class TestRegressaoNfe:
     def test_25_mapper_nfe_intacto(self):
         # Mapper NF-e ainda aceita `chave_nfe` como identidade e emite

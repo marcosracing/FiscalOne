@@ -1175,3 +1175,52 @@ Handoff: `docs/adr/_handoff/2026-07-31-focusnfe-nfse-contrato-oficial.md`.
 - Prova assistida na VM: uma página por tenant retornou
   `SEM_DOCUMENTO`, cursor `"0" → "0"`. Transporte comprovado; chegada
   de XML, Parser_Fiscal e gravação real permaneceram NÃO COMPROVADOS.
+
+---
+
+## NFS-e recebida — layout DPS Nacional 2026 (2026-07-31 R2)
+
+> **Retificação.** As seções acima descreviam o "contrato oficial"
+> como sendo o layout municipal legado (`chave_nfse`, `situacao`
+> textual, planos, `valor_total`). A prova operacional
+> 2026-07-31 21:25 revelou que a Focus entrega em produção o **layout
+> DPS Nacional 2026** (padrão nacional NFS-e / DPS + DF-e), que usa
+> `numero_dfse`/`id_dps` como identidade, planos com sufixo
+> `_prestador`/`_tomador`, `valor_servico`/`iss_valor` e
+> `data_processo`. Ambos os layouts convivem no mapper com marca
+> `_layout_focus`.
+
+`_mapear_nfse_focus` (`providers/focusnfe_provider.py`) aceita:
+
+| `_layout_focus` | Identidade preferencial | Situação | Prestador |
+|---|---|---|---|
+| `oficial`     | `chave_nfse` | `situacao` textual | `documento_prestador` (root) |
+| `legacy`      | `chave`/`chNFe`/`chave_nfe` | `status` int | `prestador.cnpj` (aninhado) |
+| `dps_nacional`| `numero_dfse` → `id_dps` | Default `autorizado`; sinais no root para `cancelado`/`substituido` | `cnpj_prestador` (root) |
+
+Regra invariante: **situação textual desconhecida** (nos layouts
+`oficial`/`legacy`) levanta `ValueError` — nunca é convertida em
+"autorizado". No layout `dps_nacional`, sem sinal explícito
+(`data_cancelamento`, `chave_nfse_substituida`), o default é
+`autorizada` — por design da API, que só devolve documentos válidos na
+listagem (cancelamento e substituição vêm em eventos separados com
+sinais explícitos).
+
+Fallbacks DPS de campos:
+
+- `valor_total` ← `valor_servico`;
+- `valor_iss` ← `iss_valor`;
+- `data_geracao` ← `data_processo`;
+- `numero` ← `numero_dfse`/`numero_dps`;
+- `serie` ← `serie_dps`;
+- `competencia` ← `data_competencia`;
+- `discriminacao` ← `descricao_servico`.
+
+**Fail-closed no dispatcher** (`app.py::_classificar_acao_gov_fetch`,
+2026-07-31 R2): se `recebidos_da_focus > 0` mas
+`documentos_mapeados == 0` (e `erros_de_mapeamento > 0`), o veredito é
+**`ERRO`**, não `SEM_DOCUMENTO`. Impede que um schema divergente vindo
+da Focus mascare documentos válidos como ausência de nota.
+
+Handoff:
+`docs/adr/_handoff/2026-07-31-focusnfe-nfse-dps-nacional.md`.

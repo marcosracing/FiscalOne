@@ -119,6 +119,11 @@ def _classificar_acao_gov_fetch(result: dict, docs_count: int) -> str:
     Fonte primaria: existencia de documentos no lote.
     Fonte secundaria: cstat (SEFAZ) ou status (ADN).
     Fonte terciaria: codigo tecnico (erro do FiscalOne ou upstream).
+
+    Fix 2026-07-31 R2: se a resposta upstream trouxe itens mas o mapper
+    rejeitou todos (`erros_de_mapeamento > 0` e `docs_count == 0`), a
+    classificação é **ERRO** — nunca SEM_DOCUMENTO. Isso impede que um
+    schema divergente mascare documentos válidos como ausência.
     """
     codigo = (result or {}).get("codigo")
     cstat  = str((result or {}).get("cstat") or "").strip()
@@ -143,8 +148,38 @@ def _classificar_acao_gov_fetch(result: dict, docs_count: int) -> str:
     if cstat and cstat not in _CSTAT_OK_SEM_DOC and cstat not in _CSTAT_OK_COM_DOC:
         return "REJEITADO"
 
+    # Fail-closed contra mascaramento: se o upstream devolveu itens mas
+    # o mapper rejeitou todos, a resposta NÃO é ausência de documento.
+    erros_map = _erros_de_mapeamento(result)
+    recebidos = _recebidos_da_focus(result)
+    if erros_map > 0 or (recebidos > 0 and docs_count == 0):
+        return "ERRO"
+
     # Sucesso sem documento (cstat 137, status SEM_DOCUMENTO, ou nada retornado)
     return "SEM_DOCUMENTO"
+
+
+def _erros_de_mapeamento(result: dict) -> int:
+    """Conta erros de mapeamento no envelope FocusNFe/upstream. Aceita
+    ambos o contador nomeado (novo) e a lista `erros[]` (compat)."""
+    r = result or {}
+    v = r.get("erros_de_mapeamento")
+    if isinstance(v, int) and v >= 0:
+        return v
+    lst = r.get("erros")
+    return len(lst) if isinstance(lst, list) else 0
+
+
+def _recebidos_da_focus(result: dict) -> int:
+    """Quantidade de itens efetivamente retornados pelo upstream (Focus)
+    — antes do mapper. Aceita `recebidos_da_focus` (novo) e
+    `quantidade_retornada` (compat)."""
+    r = result or {}
+    for k in ("recebidos_da_focus", "quantidade_retornada"):
+        v = r.get(k)
+        if isinstance(v, int) and v >= 0:
+            return v
+    return 0
 
 
 def _nsu_avancou(acao: str) -> bool:

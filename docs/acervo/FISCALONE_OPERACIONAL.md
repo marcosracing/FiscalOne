@@ -289,3 +289,37 @@ O log estruturado passou a mascarar CNPJ e chave (`***` + quatro
 Importação assistida de uma página por tenant retornou zero itens e
 zero erros, sem avanço efetivo do cursor. O endpoint é exclusivo de
 NFS-e Nacional; nenhuma conclusão foi inferida sobre NFS-e municipal.
+
+## NFS-e recebida — layout DPS Nacional 2026 (2026-07-31 R2)
+
+**Fato descoberto por prova operacional:** a listagem
+`GET /v2/nfsens_recebidas` da FocusNFe entrega em produção o
+**layout DPS Nacional 2026** (padrão nacional NFS-e / DPS + DF-e),
+não o layout municipal legado descrito na documentação pública.
+Payloads reais têm `numero_dfse`/`id_dps` (não `chave_nfse`),
+`cnpj_prestador`/`razao_social_prestador` (planos, não aninhados),
+`valor_servico`/`iss_valor` (não `valor_total`/`valor_iss`),
+`data_processo` (não `data_geracao`). Situação NÃO vem textual: no
+DPS a listagem só devolve documentos válidos; cancel/substit são
+inferidos por sinais explícitos no root (`data_cancelamento`,
+`chave_nfse_substituida`).
+
+Correção: `_mapear_nfse_focus` aceita os três layouts (`oficial` |
+`legacy` | `dps_nacional`) com marca `_layout_focus`. Situação
+desconhecida (layouts textuais) continua rejeitada nominalmente —
+nunca convertida em "autorizado". Classifier `_classificar_acao_gov_fetch`
+ganhou fail-closed: se upstream trouxe itens mas mapper rejeitou
+todos → `ERRO` (nunca `SEM_DOCUMENTO`).
+
+Baseline observado pela prova: tenant `***0109` = 313 documentos
+NFS-e Nacional disponíveis; tenant `***0186` = 98 documentos. Antes
+do fix: 100/100 rejeitados no tenant 1 (`FOCUS_ITEM_INVALIDO`), 98/98
+no tenant 2 — dispatcher devolvia `SEM_DOCUMENTO` (mascaramento).
+Após deploy do FiscalOne, itens são mapeados e o cursor NFS-e passa a
+avançar corretamente. Cursor NF-e permanece isolado (endpoints
+distintos por `tipo` no dispatch).
+
+Timer `mapone-dfe-sync.timer` **permanece inactive** por decisão
+operacional anterior; MapOne e CtrlOne **não sofreram alteração de
+código**. Handoff:
+`docs/adr/_handoff/2026-07-31-focusnfe-nfse-dps-nacional.md`.

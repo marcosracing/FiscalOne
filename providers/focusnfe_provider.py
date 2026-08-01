@@ -486,32 +486,63 @@ def _normalizar_servicos_nfse(raw: Any) -> dict:
     return out
 
 
-# ── Mapper NFSe Nacional (Fase E4c · reconciliação 2026-07-31) ────────────────
+# ── Mapper NFSe · dois layouts convivendo (2026-07-31 R2) ────────────────────
 #
-# CONTRATO OFICIAL da listagem `GET /v2/nfsens_recebidas`
-# (https://doc.focusnfe.com.br/reference/consultar_nfsen_recebidas):
+# A listagem `GET /v2/nfsens_recebidas` da FocusNFe retorna, em produção
+# real, o layout **DPS Nacional 2026** (padrão nacional NFS-e /
+# DPS + DF-e). A documentação pública em
+# `https://doc.focusnfe.com.br/reference/consultar_nfsen_recebidas`
+# descreve o layout **municipal legado** (`chave_nfse`, `situacao`
+# textual, prestador aninhado, etc.). Este mapper aceita **os dois** e
+# marca o layout escolhido em `_layout_focus`.
 #
-#   - `chave_nfse` (string opaca — identidade do documento);
-#   - `situacao` (textual): "autorizado" | "cancelado" | "substituido";
-#   - `nome_prestador`, `documento_prestador` (planos, no root);
-#   - `nome_tomador`, `documento_tomador` (planos, no root);
-#   - `valor_total` (root);
-#   - `data_emissao`, `data_geracao` (root);
+# **Layout DPS Nacional 2026** (real — confirmado por prova operacional
+# 2026-07-31):
+#
+#   - `numero_dfse` (identidade DF-e nacional; opaca);
+#   - `id_dps` (fallback de identidade interno FocusNFe);
 #   - `versao` (int incremental — cursor opaco);
+#   - `cnpj_prestador`, `razao_social_prestador`,
+#     `inscricao_municipal_prestador` (planos no root);
+#   - `cnpj_tomador`, `razao_social_tomador` (planos no root);
+#   - `valor_servico`, `valor_liquido`, `iss_valor` (planos no root);
+#   - `data_emissao`, `data_processo`, `data_competencia`;
+#   - `numero_dps`, `serie_dps`, `numero`;
+#   - `descricao_servico`;
+#   - `documentos` (aninhado — refs a documentos filhos, incluindo
+#     eventuais cancelamentos/substituições).
+#
+# Situação no layout DPS: a listagem só devolve documentos válidos.
+# Cancelamento e substituição são inferidos por **sinais explícitos**
+# (`data_cancelamento`, `chave_nfse_substituida`/`chave_substituida`).
+# Sem sinais → default `autorizada` — nunca por chute silencioso; o
+# schema DPS é auto-descritivo neste ponto.
+#
+# **Layout municipal legado** (documentação Focus 2026):
+#
+#   - `chave_nfse` (identidade opaca);
+#   - `situacao` (textual): "autorizado" | "cancelado" | "substituido";
+#   - `nome_prestador`, `documento_prestador` (planos);
+#   - `nome_tomador`, `documento_tomador` (planos);
+#   - `valor_total`, `valor_iss`, `valor_liquido` (planos);
+#   - `data_emissao`, `data_geracao`;
 #   - opcionais: `data_cancelamento`, `chave_nfse_substituida`,
 #                `numero`, `serie`, `codigo_verificacao`, `competencia`.
 #
-# O contrato oficial NÃO usa: `chave` como nome principal, `status`
-# numérico exclusivamente, `prestador`/`tomador`/`servicos` aninhados
-# obrigatoriamente, `url_xml` obrigatória. Layouts históricos com esse
-# formato são aceitos por um adaptador EXPLÍCITO (documentado e testado)
-# — nunca por leitura silenciosa mista.
+# **Adaptador histórico explícito** (`_layout_focus="legacy"`): itens
+# antigos com `chave`/`chNFe`/`chave_nfe`, `status` numérico (1/2/3),
+# ou dicts aninhados `prestador`/`tomador`/`servicos` são aceitos por
+# adaptador nomeado — nunca por leitura silenciosa mista.
 #
-# Ausência de `chave_nfse` **ou** de `versao` levanta ValueError — o
-# consumidor (gov_fetch pré-mapper) trata como erro nominal por
-# documento e bloqueia o cursor antes do item, sem perder posteriores.
-# Situação desconhecida também levanta — nunca é convertida em
-# "autorizado".
+# Regras invariantes:
+#   - Ausência de identidade (nenhum dos quatro nomes) → `ValueError`.
+#   - `versao` ausente/inválida → `ValueError`.
+#   - Situação textual desconhecida no layout `oficial`/`legacy` →
+#     `ValueError` (nunca convertida em "autorizado").
+#   - No layout DPS, ausência de sinais de cancelamento/substituição
+#     → default `autorizada` (design da API — a listagem só devolve
+#     documentos válidos).
+#   - Consumidor bloqueia cursor antes do item que levantar `ValueError`.
 _SITUACAO_NFSE_MAP = {
     # oficial textual → (situacao_canonica, cancelado, substituido)
     "autorizado":  ("autorizada",  0, 0),
@@ -560,7 +591,12 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
     if not isinstance(item, dict):
         raise ValueError(f"item nao e dict: {type(item).__name__}")
 
-    # ── Identidade (chave_nfse é o nome oficial) ──────────────────────
+    # ── Identidade ────────────────────────────────────────────────────
+    # Precedência:
+    #   1. `chave_nfse`             — layout municipal legado (Focus doc).
+    #   2. `chave`/`chNFe`/`chave_nfe` — retrocompat (marca `legacy`).
+    #   3. `numero_dfse`            — layout DPS Nacional 2026 (real).
+    #   4. `id_dps`                 — fallback DPS (id interno FocusNFe).
     chave = _get_str(item, "chave_nfse")
     layout = "oficial"
     if not chave:
@@ -568,7 +604,18 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
         if chave:
             layout = "legacy"
     if not chave:
-        raise ValueError("chave_nfse ausente no item Focus (nem chave legacy)")
+        chave = _get_str(item, "numero_dfse")
+        if chave:
+            layout = "dps_nacional"
+    if not chave:
+        chave = _get_str(item, "id_dps")
+        if chave:
+            layout = "dps_nacional"
+    if not chave:
+        raise ValueError(
+            "identidade NFS-e ausente no item Focus (nem chave_nfse, chave, "
+            "numero_dfse, id_dps)"
+        )
 
     # ── Versão (cursor opaco — obrigatória por doc) ───────────────────
     # `_versao_focus_valida` já é a decisão canônica de "versão válida";
@@ -578,7 +625,11 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
         raise ValueError("versao FocusNFe ausente/invalida no item NFS-e")
     versao = versao_valida
 
-    # ── Situação (textual oficial preferida; adaptador legacy explícito)
+    # ── Situação ──────────────────────────────────────────────────────
+    # Layout oficial/legacy: `situacao` textual (root) ou `status` int.
+    # Layout DPS Nacional: sinais explícitos no root (`data_cancelamento`,
+    # `chave_nfse_substituida`); ausência → default `autorizada` (design
+    # da API — a listagem só retorna documentos válidos).
     situacao_raw = _get_str(item, "situacao").strip().lower()
     if not situacao_raw:
         status_int_raw = item.get("status")
@@ -590,6 +641,15 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
                     layout = "legacy"
             except (TypeError, ValueError):
                 situacao_raw = ""
+    if not situacao_raw and layout == "dps_nacional":
+        # Sinais nominais de estado no layout DPS. Cancelamento e
+        # substituição vêm de campos explícitos; ausência → autorizada.
+        if _get_str(item, "data_cancelamento"):
+            situacao_raw = "cancelado"
+        elif _get_str(item, "chave_nfse_substituida", "chave_substituida"):
+            situacao_raw = "substituido"
+        else:
+            situacao_raw = "autorizado"
     if not situacao_raw:
         raise ValueError(
             "situacao NFS-e ausente no item Focus (nem status legacy)"
@@ -602,10 +662,13 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
         raise ValueError(f"situacao NFS-e desconhecida: {situacao_raw!r}")
     situacao_nfse, cancelado_r, substituido_r = mapa_sit
 
-    # ── Prestador / Tomador (planos no oficial; aninhados no legacy) ──
-    # Prioridade oficial: `nome_prestador`, `documento_prestador`,
-    # `nome_tomador`, `documento_tomador` no root. Se ausentes, tenta
-    # adaptador aninhado.
+    # ── Prestador / Tomador (planos: oficial e DPS; aninhado: legacy) ─
+    # Ordem de leitura:
+    #   1. `nome_prestador`/`documento_prestador` (contrato municipal
+    #      oficial, planos no root);
+    #   2. `cnpj_prestador`/`cpf_prestador`/`razao_social_prestador` (DPS
+    #      Nacional 2026, planos no root);
+    #   3. `prestador.{cnpj|cpf|razao_social}` (adaptador aninhado).
     prest_doc = _digitos_documento(
         _get_str(item, "documento_prestador", "cnpj_prestador",
                  "cpf_prestador")
@@ -640,11 +703,17 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
         tom_nome = _get_str(tomador_aninh, "razao_social")
     tom_tipo = "cnpj" if len(tom_doc) > 11 else ("cpf" if tom_doc else "")
 
-    # ── Valores / metadados (root oficial; adaptador aninhado) ────────
-    v_total = _get_str(item, "valor_total", "valor_liquido_nfse")
+    # ── Valores / metadados ───────────────────────────────────────────
+    # Oficial municipal: `valor_total`. DPS Nacional: `valor_servico`
+    # (bruto) e `valor_liquido` (com deduções). Legacy aninhado:
+    # `servicos.valor_servicos`.
+    v_total = _get_str(item, "valor_total", "valor_liquido_nfse",
+                       "valor_servico")
     servicos_aninh = _normalizar_servicos_nfse(item.get("servicos"))
     v_servicos = _get_str(servicos_aninh, "valor_servicos") if servicos_aninh else ""
-    v_iss = _get_str(item, "valor_iss") or _get_str(servicos_aninh, "valor_iss")
+    v_iss = (_get_str(item, "valor_iss")
+             or _get_str(item, "iss_valor")
+             or _get_str(servicos_aninh, "valor_iss"))
     v_liquido = _get_str(item, "valor_liquido") or _get_str(servicos_aninh, "valor_liquido")
     if v_servicos and not v_total:
         v_total = v_servicos
@@ -655,15 +724,17 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
         else servicos_aninh.get("iss_retido")
     )
     discriminacao = (_get_str(item, "discriminacao")
+                     or _get_str(item, "descricao_servico")
                      or _get_str(servicos_aninh, "discriminacao"))
     item_lista_servico = (_get_str(item, "item_lista_servico")
                           or _get_str(servicos_aninh, "item_lista_servico"))
     codigo_cnae = (_get_str(item, "codigo_cnae")
                    or _get_str(servicos_aninh, "codigo_cnae"))
 
-    # ── Datas — contrato oficial expõe `data_emissao` e `data_geracao`
+    # ── Datas — oficial: `data_emissao`/`data_geracao`;
+    #             DPS Nacional: `data_processo` no lugar de data_geracao.
     dh_emi     = _get_str(item, "data_emissao")
-    dh_geracao = _get_str(item, "data_geracao")
+    dh_geracao = _get_str(item, "data_geracao", "data_processo")
 
     # ── Campos de cancelamento e substituição opcionais ───────────────
     data_cancel  = _get_str(item, "data_cancelamento")
@@ -678,11 +749,11 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
         "chave_nfse":      chave,
         "chave":           chave,
         "chNFe":           chave,
-        "numero":          _get_str(item, "numero"),
-        "serie":           _get_str(item, "serie"),
+        "numero":          _get_str(item, "numero", "numero_dfse", "numero_dps"),
+        "serie":           _get_str(item, "serie", "serie_dps"),
         "codigo_verificacao": _get_str(item, "codigo_verificacao"),
         "versao":          versao,
-        "competencia":     _get_str(item, "competencia"),
+        "competencia":     _get_str(item, "competencia", "data_competencia"),
         # Prestador → emit_* (fornecedor da NFSe recebida).
         "emit_cnpj":       prest_doc,
         "emit_doc_tipo":   prest_tipo,
