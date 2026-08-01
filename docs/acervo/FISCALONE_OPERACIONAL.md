@@ -284,3 +284,8 @@ erros de processamento. Canceladas/substituídas permanecem eventos
 nominais, sem Espelho fabricado pelo resumo. Fixtures foram saneadas
 para identificadores exclusivamente sintéticos. A disponibilidade de
 XML individual desses estados permanece **NÃO COMPROVADA**.
+O log estruturado passou a mascarar CNPJ e chave (`***` + quatro
+últimos caracteres), preservando correlação sem exposição integral.
+Importação assistida de uma página por tenant retornou zero itens e
+zero erros, sem avanço efetivo do cursor. O endpoint é exclusivo de
+NFS-e Nacional; nenhuma conclusão foi inferida sobre NFS-e municipal.

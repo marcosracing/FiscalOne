@@ -263,6 +263,15 @@ def _trace(req):
     tid = req.headers.get("X-Trace-Id", "").strip()
     return tid if tid else f"fo-{uuid.uuid4().hex}"
 
+
+def _mascarar_identificador_log(valor):
+    """Mantém correlação operacional sem expor CNPJ/chave completos."""
+    texto = str(valor or "").strip()
+    if not texto:
+        return None
+    return f"***{texto[-4:]}"
+
+
 def _log_stdout(operacao, resultado, trace_id, **kwargs):
     """
     Log técnico estruturado em stdout — sem banco próprio (ADR-0035).
@@ -276,9 +285,9 @@ def _log_stdout(operacao, resultado, trace_id, **kwargs):
         "resultado":   resultado,
         "trace_id":    trace_id,
         "source":      kwargs.get("source_system", "desconhecido"),
-        "cnpj":        kwargs.get("company_cnpj"),
+        "cnpj":        _mascarar_identificador_log(kwargs.get("company_cnpj")),
         "doc_type":    kwargs.get("doc_type"),
-        "chave":       kwargs.get("chave_doc"),
+        "chave":       _mascarar_identificador_log(kwargs.get("chave_doc")),
         # Campos novos para gov_fetch (MapOne consome via journal/stdout)
         "cstat":            kwargs.get("cstat"),
         "acao":             kwargs.get("acao"),

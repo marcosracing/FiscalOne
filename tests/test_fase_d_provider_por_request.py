@@ -390,3 +390,5 @@ class TestSegurancaFaseD:
         assert token not in captured.err
         assert "authorization" not in captured.out.lower()
         assert "focusnfe_token" not in captured.out.lower()
+        assert "07219398000109" not in captured.out
+        assert '"cnpj": "***0109"' in captured.out

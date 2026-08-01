@@ -1169,4 +1169,9 @@ Handoff: `docs/adr/_handoff/2026-07-31-focusnfe-nfse-contrato-oficial.md`.
   `resumos_pendentes`, `cancelados` e `substituidos`.
 - Fixtures usam somente identificadores sintéticos (`0` repetido para
   documento e `9` repetido para chave), sem CNPJ ou chave de cliente.
+- Logs estruturados mascaram CNPJ/chave como `***` + quatro últimos
+  caracteres; a importação assistida revelou e fechou essa exposição.
 - Suíte integral após a R1: 514/514 testes verdes.
+- Prova assistida na VM: uma página por tenant retornou
+  `SEM_DOCUMENTO`, cursor `"0" → "0"`. Transporte comprovado; chegada
+  de XML, Parser_Fiscal e gravação real permaneceram NÃO COMPROVADOS.

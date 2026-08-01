@@ -320,7 +320,29 @@ corrigidas antes de qualquer deploy:
    `NAO_COMPROVADO` até existir evidência real;
 4. CNPJ/chave de aparência real foram eliminados das fixtures novas e
    substituídos por sentinelas sintéticos.
+5. a importação assistida revelou CNPJ completo no journal; `_log_stdout`
+   agora registra somente `***` + quatro últimos caracteres, com teste
+   comportamental de não exposição.
 
 Prova local R1: 172 testes focados e 514 testes integrais verdes.
 Importação assistida e evidência da VM são registradas abaixo somente
 após execução controlada.
+
+### Importação assistida R1
+
+Após o deploy seletivo de `app.py` e `providers/focusnfe_provider.py`,
+foi executada uma página NFS-e por tenant configurado, sequencialmente,
+sem drain e sem alteração de cursor NF-e.
+
+- tenant 1: provider `focusnfe`, cursor `versao`, `"0" → "0"`,
+  `SEM_DOCUMENTO`, 0 recebidos e 0 erros;
+- tenant 2: mesmo resultado;
+- FiscalOne e MapOne permaneceram ativos, health HTTP 200 e nenhum
+  warning novo no journal;
+- como a Focus devolveu lista vazia, **XML, Parser_Fiscal e gravação do
+  Espelho não foram exercitados com documento real**. Essa parte da
+  cadeia permanece NÃO COMPROVADA, não aprovada por inferência.
+
+O endpoint consultado é exclusivo de **NFS-e Nacional**. A hipótese de
+que as 27 NFS-e históricas sejam municipais/legadas, portanto fora
+desse endpoint, permanece pendente de evidência do provedor.
