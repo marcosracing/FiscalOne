@@ -1134,10 +1134,10 @@ bloco linhas 1723-1770): `Content-Type` HTML/JSON/texto ou prefixo
 `<html`/`<!doctype html` (proxy respondendo HTML) retorna
 `FOCUS_XML_CONTENT_TYPE_INVALIDO` — nunca persistido como XML.
 
-**Cancelada/substituída**: XML **não é baixado** para essas situações
-(comportamento pré-existente preservado). O consumidor persiste
-evento/estado nominal a partir dos metadados da listagem; nenhum
-Espelho válido é fabricado a partir do resumo.
+**Cancelada/substituída**: não fabrica Espelho a partir do resumo e é
+devolvida como `status_xml=EVENTO`, com
+`xml_individual_estado=NAO_COMPROVADO`. A disponibilidade de XML
+individual nesses estados ainda não foi comprovada com payload real.
 `chave_nfse_substituida` é preservada quando fornecida.
 
 **Isolamento NF-e × NFS-e**: mapper NF-e (`_mapear_nfe_focus`) não
@@ -1157,3 +1157,16 @@ Focus verde (267/267). Suíte integral FiscalOne verde (512/512). Gate
 ADR-0046 MapOne+CtrlOne verde.
 
 Handoff: `docs/adr/_handoff/2026-07-31-focusnfe-nfse-contrato-oficial.md`.
+
+### Retificação R1 — contrato HTTP e telemetria (2026-07-31)
+
+- HTTP 400 com `codigo=empresa_nao_habilitada` agora retorna
+  `FOCUS_NFSE_NAO_HABILITADA`; o teste executa 400 real, não 403.
+- `recebidos`/`recebidos_da_focus` representam itens retornados pela
+  Focus. Erros permanecem em `erros_count`/`erros_de_mapeamento` e não
+  são somados aos recebidos.
+- Contadores adicionais: `xmls_recuperados`, `documentos_mapeados`,
+  `resumos_pendentes`, `cancelados` e `substituidos`.
+- Fixtures usam somente identificadores sintéticos (`0` repetido para
+  documento e `9` repetido para chave), sem CNPJ ou chave de cliente.
+- Suíte integral após a R1: 514/514 testes verdes.

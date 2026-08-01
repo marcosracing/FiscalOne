@@ -61,7 +61,8 @@ from providers.focusnfe_provider import (
 )
 
 
-CHAVE_OK = "35202607000000000000000000000000000000000042"
+CHAVE_OK = "9" * 44
+CNPJ_SINTETICO = "0" * 14
 
 
 @pytest.fixture
@@ -93,9 +94,9 @@ def _item_oficial(**overrides):
         "situacao":            "autorizado",
         "versao":              42,
         "nome_prestador":      "Prestador Oficial LTDA",
-        "documento_prestador": "12345678000199",
-        "nome_tomador":        "Racing Logistica",
-        "documento_tomador":   "07219398000109",
+        "documento_prestador": CNPJ_SINTETICO,
+        "nome_tomador":        "Tomador Sintetico",
+        "documento_tomador":   CNPJ_SINTETICO,
         "valor_total":         "1500.00",
         "valor_iss":           "75.00",
         "valor_liquido":       "1425.00",
@@ -169,11 +170,11 @@ class TestMapperContratoOficial:
 
     def test_7_campos_planos_prestador(self):
         d = _mapear_nfse_focus(_item_oficial(), "trace-7")
-        assert d["emit_cnpj"] == "12345678000199"
+        assert d["emit_cnpj"] == CNPJ_SINTETICO
         assert d["emit_doc_tipo"] == "cnpj"
         assert d["emit_nome"] == "Prestador Oficial LTDA"
-        assert d["dest_cnpj"] == "07219398000109"
-        assert d["dest_nome"] == "Racing Logistica"
+        assert d["dest_cnpj"] == CNPJ_SINTETICO
+        assert d["dest_nome"] == "Tomador Sintetico"
         # Valor plano, não aninhado em `servicos`.
         assert d["valor_total"] == "1500.00"
         # data_geracao é campo oficial, precisa ser preservado.
@@ -217,13 +218,13 @@ class TestGovFetchListagemOficial:
         xml_ok = _mock_resp(status=200, text="<CompNfse/>")
         mock_get.side_effect = [listagem, xml_ok]
         r = provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
             "trace-9",
         )
         assert r["ok"] is True
         args, kwargs = mock_get.call_args_list[0]
         assert args[0].endswith("/v2/nfsens_recebidas")
-        assert kwargs["params"]["cnpj"] == "07219398000109"
+        assert kwargs["params"]["cnpj"] == CNPJ_SINTETICO
         assert kwargs["params"]["versao"] == "0"
         assert kwargs["params"]["completa"] == "1"
 
@@ -242,7 +243,7 @@ class TestGovFetchListagemOficial:
         )
         mock_get.side_effect = [listagem]
         r = provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
             "trace-10",
         )
         assert r["ok"] is True
@@ -260,7 +261,7 @@ class TestGovFetchListagemOficial:
         )
         mock_get.side_effect = [listagem]
         r = provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
             "trace-11",
         )
         assert r["cursor_seguro"] == "9999"
@@ -275,7 +276,7 @@ class TestGovFetchListagemOficial:
         )
         mock_get.side_effect = [listagem]
         r = provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
             "trace-12",
         )
         assert r["total_count"] == 12345
@@ -295,7 +296,7 @@ class TestGovFetchListagemOficial:
         )
         mock_get.side_effect = [listagem]
         r = provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "5"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "5"},
             "trace-18",
         )
         # Documento 11 vira erro; cursor não pode ultrapassar 10.
@@ -309,7 +310,7 @@ class TestGovFetchListagemOficial:
         listagem = _mock_resp(status=200, headers={}, json_data=[])
         mock_get.side_effect = [listagem]
         r = provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "42"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "42"},
             "trace-20",
         )
         assert r["ok"] is True
@@ -391,16 +392,17 @@ class TestXmlIndividualPorChave:
 class TestHttpErrosNominais:
     @patch("providers.focusnfe_provider.requests.get")
     def test_15_400_empresa_nao_habilitada(self, mock_get, provider):
-        resp = _mock_resp(status=403,
+        resp = _mock_resp(status=400,
                           json_data={"codigo": "empresa_nao_habilitada",
                                      "mensagem": "Empresa nao habilitada"})
         mock_get.return_value = resp
         r = provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
             "trace-15",
         )
         assert r["ok"] is False
         assert r["codigo"] == "FOCUS_NFSE_NAO_HABILITADA"
+        assert r["http_status"] == 400
         assert r["nsu_avancou"] is False
 
     @patch("providers.focusnfe_provider.requests.get")
@@ -409,7 +411,7 @@ class TestHttpErrosNominais:
                           json_data={"erro": "cnpj invalido"})
         mock_get.return_value = resp
         r = provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
             "trace-16",
         )
         assert r["ok"] is False
@@ -423,7 +425,7 @@ class TestHttpErrosNominais:
                           json_data={"mensagem": "rate limit"})
         mock_get.return_value = resp
         r = provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "42"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "42"},
             "trace-17a",
         )
         assert r["ok"] is False
@@ -436,7 +438,7 @@ class TestHttpErrosNominais:
     def test_17b_timeout_sem_avanco(self, mock_get, provider):
         mock_get.side_effect = requests.exceptions.Timeout()
         r = provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "42"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "42"},
             "trace-17b",
         )
         assert r["ok"] is False
@@ -449,7 +451,7 @@ class TestHttpErrosNominais:
         resp = _mock_resp(status=503)
         mock_get.return_value = resp
         r = provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "42"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "42"},
             "trace-17c",
         )
         assert r["ok"] is False
@@ -462,7 +464,7 @@ class TestHttpErrosNominais:
         resp = _mock_resp(status=200)  # sem json_data → resp.json() ValueError
         mock_get.return_value = resp
         r = provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
             "trace-json",
         )
         assert r["ok"] is False
@@ -482,7 +484,7 @@ class TestIsolamentoDocType:
                               json_data=[_item_oficial(situacao="cancelado")])
         mock_get.side_effect = [listagem]
         provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
             "trace-21",
         )
         # NENHUMA chamada pode ter mirado /v2/nfes_recebidas.
@@ -496,7 +498,7 @@ class TestIsolamentoDocType:
         listagem = _mock_resp(status=200, headers={}, json_data=[])
         mock_get.side_effect = [listagem]
         provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfe", "ultimo_nsu": "0"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfe", "ultimo_nsu": "0"},
             "trace-22",
         )
         for call in mock_get.call_args_list:
@@ -510,7 +512,7 @@ class TestIsolamentoDocType:
         with patch("providers.focusnfe_provider.requests.get") as mg:
             mg.return_value = _mock_resp(status=200, headers={}, json_data=[])
             r = provider.gov_fetch(
-                {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "1"},
+                {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "1"},
                 "trace-cursor",
             )
         assert r["cursor_tipo"] == "versao"
@@ -538,7 +540,7 @@ class TestTelemetriaSeparada:
         )
         mock_get.side_effect = [listagem]
         r = provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
             "trace-23",
         )
         # 2 documentos válidos, 1 erro.
@@ -548,6 +550,29 @@ class TestTelemetriaSeparada:
         assert r["quantidade_retornada"] == 3
         # Documentos NÃO se somam com erros no envelope.
         assert len(r["documentos"]) + len(r["erros"]) == r["quantidade_retornada"]
+        assert r["recebidos_da_focus"] == 3
+        assert r["documentos_mapeados"] == 2
+        assert r["erros_de_mapeamento"] == 1
+
+    @patch("providers.focusnfe_provider.requests.get")
+    @pytest.mark.parametrize("situacao", ["cancelado", "substituido"])
+    def test_cancelada_ou_substituida_vira_evento_sem_fabricar_espelho(
+            self, mock_get, provider, situacao):
+        listagem = _mock_resp(
+            status=200,
+            headers={"X-Max-Version": "42"},
+            json_data=[_item_oficial(situacao=situacao)],
+        )
+        mock_get.side_effect = [listagem]
+        r = provider.gov_fetch(
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
+            "trace-cancel-subst",
+        )
+        doc = r["documentos"][0]
+        assert doc["status_xml"] == "EVENTO"
+        assert doc["xml_individual_estado"] == "NAO_COMPROVADO"
+        assert "xml_bruto" not in doc
+        assert mock_get.call_count == 1
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -566,7 +591,7 @@ class TestXmlComoFonteCanonica:
         xml_ok = _mock_resp(status=200, text="<CompNfse><Nfse/></CompNfse>")
         mock_get.side_effect = [listagem, xml_ok]
         r = provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
             "trace-24",
         )
         d = r["documentos"][0]
@@ -581,7 +606,7 @@ class TestXmlComoFonteCanonica:
         xml_404 = _mock_resp(status=404, text="")
         mock_get.side_effect = [listagem, xml_404]
         r = provider.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
             "trace-24b",
         )
         d = r["documentos"][0]

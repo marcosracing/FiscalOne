@@ -318,7 +318,9 @@ class TestGovFetchNfseXmlUrl:
             {"cnpj": "07219398000109", "tipo": "nfse", "ultimo_nsu": "0"},
             "fo-e4c")
         assert mock_get.call_count == 1
-        assert all(d.get("status_xml") == "RESUMO" for d in r["documentos"])
+        assert all(d.get("status_xml") == "EVENTO" for d in r["documentos"])
+        assert all(d.get("xml_individual_estado") == "NAO_COMPROVADO"
+                   for d in r["documentos"])
         assert r["xmls_baixados"] == 0
 
 

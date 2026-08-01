@@ -303,3 +303,24 @@ sudo systemctl start mapone-dfe-sync.timer
 
 **Sem deploy nesta rodada. Sem restart de serviço. Sem ativação de
 timer. Sem reimportação de acervo.**
+
+---
+
+## Retificação R1 — revisão independente (2026-07-31)
+
+A revisão pós-entrega encontrou quatro divergências e elas foram
+corrigidas antes de qualquer deploy:
+
+1. o teste nominal de HTTP 400 usava 403; agora código e teste tratam
+   `empresa_nao_habilitada` no 400 documentado;
+2. `recebidos` somava erros; agora recebido, mapeado, XML recuperado,
+   pendência e erro são contadores distintos;
+3. cancelada/substituída deixa de ser `RESUMO` ambíguo e passa a
+   `EVENTO`, sem fabricar Espelho; XML individual continua
+   `NAO_COMPROVADO` até existir evidência real;
+4. CNPJ/chave de aparência real foram eliminados das fixtures novas e
+   substituídos por sentinelas sintéticos.
+
+Prova local R1: 172 testes focados e 514 testes integrais verdes.
+Importação assistida e evidência da VM são registradas abaixo somente
+após execução controlada.

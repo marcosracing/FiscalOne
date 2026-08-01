@@ -614,6 +614,11 @@ def gov_fetch():
                       if d.get("status_xml") == "EVENTO")
     erros_n     = len(erros_arr)
     processados = persistidos + resumos_n + erros_n
+    recebidos_da_focus = result.get("recebidos_da_focus")
+    if recebidos_da_focus is None:
+        recebidos_da_focus = result.get("quantidade_retornada")
+    if recebidos_da_focus is None:
+        recebidos_da_focus = persistidos + resumos_n
 
     # Classificacao definitiva para MapOne — decide se atualiza NSU no CtrlOne.
     docs_efetivos    = persistidos + resumos_n + eventos_n
@@ -630,13 +635,20 @@ def gov_fetch():
         "acao":                     acao,
         "nsu_avancou":              nsu_avancou,
         "status_lote":              _classificar_status_lote(processados, persistidos, erros_n),
-        "recebidos":                processados,
+        "recebidos":                recebidos_da_focus,
+        "recebidos_da_focus":       recebidos_da_focus,
         "processados":              processados,
         "persistidos":              persistidos,
         "duplicados":               0,   # duplicidade e escopo do MapOne
         "resumos_count":            resumos_n,
         "eventos":                  eventos_n,
         "erros_count":              erros_n,
+        "xmls_recuperados":         result.get("xmls_recuperados"),
+        "documentos_mapeados":      result.get("documentos_mapeados"),
+        "resumos_pendentes":        result.get("resumos_pendentes"),
+        "erros_de_mapeamento":      result.get("erros_de_mapeamento"),
+        "cancelados":               result.get("cancelados"),
+        "substituidos":             result.get("substituidos"),
         "cstat":                    result.get("cstat"),
         "xmotivo":                  result.get("xmotivo"),
         "provider":                 result.get("provider"),

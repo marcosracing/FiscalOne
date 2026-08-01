@@ -847,6 +847,22 @@ class FocusNFeProvider(GovProvider):
         # ── HTTP status ──────────────────────────────────────────────────
         status_code = resp.status_code
         if status_code == 400:
+            focus_codigo = ""
+            try:
+                body_400 = resp.json()
+                if isinstance(body_400, dict):
+                    focus_codigo = str(body_400.get("codigo") or "").strip().lower()
+            except (ValueError, TypeError):
+                focus_codigo = ""
+            if tipo == "nfse" and focus_codigo == "empresa_nao_habilitada":
+                return _envelope_erro(
+                    trace_id, "FOCUS_NFSE_NAO_HABILITADA",
+                    "Empresa nao habilitada no FocusNFe para NFSe Nacional. "
+                    "Contate o suporte Focus para habilitar o CNPJ antes de "
+                    "acionar buscas.",
+                    {"http_status": 400,
+                     "ultimo_nsu": versao_entrada, "max_nsu": versao_entrada},
+                )
             return _envelope_erro(
                 trace_id, "FOCUS_BAD_REQUEST",
                 "FocusNFe rejeitou o payload (400).",
@@ -1056,14 +1072,18 @@ class FocusNFeProvider(GovProvider):
         #       batch — vira RESUMO + xml_pending, preservando `versao` para
         #       o consumidor bloquear o cursor antes do gap.
         # CANCELADA (NF-e) nao baixa XML nesta fase — E4b.
-        # NFSe status 2/3 (cancelada/substituida) tambem nao baixa —
-        # substituicao/cancelamento demandam evento separado (fora do E4c).
+        # NFSe cancelada/substituida não fabrica Espelho a partir do resumo:
+        # vira EVENTO nominal rastreável. A disponibilidade de XML individual
+        # para esses estados permanece não comprovada no ambiente real.
         xml_baixados = 0
         xml_pendentes = 0
         for doc in documentos:
-            if doc.get("cancelado") == 1:
+            if tipo == "nfse" and (
+                    doc.get("cancelado") == 1 or doc.get("substituido") == 1):
+                doc["status_xml"] = "EVENTO"
+                doc["xml_individual_estado"] = "NAO_COMPROVADO"
                 continue
-            if doc.get("substituido") == 1:
+            if doc.get("cancelado") == 1:
                 continue
             if tipo == "nfse":
                 url_xml = doc.get("url_xml")
@@ -1234,6 +1254,13 @@ class FocusNFeProvider(GovProvider):
             "http_status":     200,
             "xmls_baixados":   xml_baixados,
             "xmls_pendentes":  xml_pendentes,
+            "recebidos_da_focus": quantidade_retornada,
+            "xmls_recuperados": xml_baixados,
+            "documentos_mapeados": len(documentos),
+            "resumos_pendentes": xml_pendentes,
+            "erros_de_mapeamento": len(erros),
+            "cancelados": sum(1 for d in documentos if d.get("cancelado") == 1),
+            "substituidos": sum(1 for d in documentos if d.get("substituido") == 1),
         }
 
     # ── consultar_dfe_nsu — delegacao para gov_fetch ─────────────────────

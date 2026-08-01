@@ -275,3 +275,12 @@ COMPROVADO — sem NFS-e no ATP. Timer `mapone-dfe-sync.timer` segue
 Sem restart. Sem ativação do timer.
 
 Handoff: `docs/adr/_handoff/2026-07-31-focusnfe-nfse-contrato-oficial.md`.
+
+### Retificação operacional NFS-e Focus — R1 (2026-07-31)
+
+Corrigido o tratamento nominal de `empresa_nao_habilitada` no HTTP 400
+documentado pela Focus e separada a telemetria de itens recebidos dos
+erros de processamento. Canceladas/substituídas permanecem eventos
+nominais, sem Espelho fabricado pelo resumo. Fixtures foram saneadas
+para identificadores exclusivamente sintéticos. A disponibilidade de
+XML individual desses estados permanece **NÃO COMPROVADA**.
