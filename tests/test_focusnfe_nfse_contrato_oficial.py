@@ -556,8 +556,10 @@ class TestTelemetriaSeparada:
 
     @patch("providers.focusnfe_provider.requests.get")
     @pytest.mark.parametrize("situacao", ["cancelado", "substituido"])
-    def test_cancelada_ou_substituida_vira_evento_sem_fabricar_espelho(
+    def test_cancelada_ou_substituida_continua_espelho_disponivel(
             self, mock_get, provider, situacao):
+        # 2026-07-31 R2: NFS-e cancelada/substituída também é Espelho
+        # canônico próprio (com flag explícita), não "evento sem espelho".
         listagem = _mock_resp(
             status=200,
             headers={"X-Max-Version": "42"},
@@ -566,12 +568,18 @@ class TestTelemetriaSeparada:
         mock_get.side_effect = [listagem]
         r = provider.gov_fetch(
             {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
-            "trace-cancel-subst",
+            "trace-cancel-subst-r2",
         )
         doc = r["documentos"][0]
-        assert doc["status_xml"] == "EVENTO"
-        assert doc["xml_individual_estado"] == "NAO_COMPROVADO"
+        assert doc["status_xml"] == "ESPELHO_DISPONIVEL"
+        assert doc["xml_pending"] is False
         assert "xml_bruto" not in doc
+        # Flag explícita preservada
+        if situacao == "cancelado":
+            assert doc["cancelado"] == 1
+        elif situacao == "substituido":
+            assert doc["substituido"] == 1
+        # Nenhuma chamada individual foi feita
         assert mock_get.call_count == 1
 
 
@@ -580,42 +588,45 @@ class TestTelemetriaSeparada:
 # ─────────────────────────────────────────────────────────────────────
 
 
-class TestXmlComoFonteCanonica:
-    @patch("providers.focusnfe_provider.requests.get")
-    def test_24_documento_completo_traz_xml_nao_resumo(self, mock_get, provider):
-        """`gov_fetch` marca `status_xml=COMPLETO` **somente** quando o
-        XML foi baixado. O Parser_Fiscal downstream nunca deve receber
-        um documento sem XML como se fosse completo."""
-        listagem = _mock_resp(status=200, headers={"X-Max-Version": "42"},
-                              json_data=[_item_oficial()])
-        xml_ok = _mock_resp(status=200, text="<CompNfse><Nfse/></CompNfse>")
-        mock_get.side_effect = [listagem, xml_ok]
-        r = provider.gov_fetch(
-            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
-            "trace-24",
-        )
-        d = r["documentos"][0]
-        assert d["status_xml"] == "COMPLETO"
-        assert d["xml_bruto"].startswith("<CompNfse>")
-        assert len(d["xml_hash_sha256"]) == 64
+class TestNfseComoFonteCanonicaPropria:
+    """2026-07-31 R2 (retificação ADR-0049): NFS-e recebida é documento
+    canônico próprio; o payload da listagem é fonte do EspelhoNFSe.
+    XML é auxiliar. `status_xml=ESPELHO_DISPONIVEL` sinaliza que o
+    consumidor pode persistir o Espelho imediatamente."""
 
     @patch("providers.focusnfe_provider.requests.get")
-    def test_24b_sem_xml_fica_resumo_e_bloqueia_cursor(self, mock_get, provider):
+    def test_24_payload_gera_espelho_disponivel_sem_xml(self, mock_get, provider):
         listagem = _mock_resp(status=200, headers={"X-Max-Version": "42"},
                               json_data=[_item_oficial()])
-        xml_404 = _mock_resp(status=404, text="")
-        mock_get.side_effect = [listagem, xml_404]
+        mock_get.side_effect = [listagem]
         r = provider.gov_fetch(
             {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
-            "trace-24b",
+            "trace-24-r2",
         )
         d = r["documentos"][0]
-        assert d["status_xml"] == "RESUMO"
-        assert d.get("xml_pending") is True
-        # Cursor não ultrapassa a versão pendente (42) — nesta página o
-        # menor pendente é 42, então cursor_seguro deve ficar < 42.
-        # Cursor entrada era 0; cursor seguro pode ser 0 (bloqueio antes).
-        assert int(r["cursor_seguro"]) < 42
+        assert d["status_xml"] == "ESPELHO_DISPONIVEL"
+        assert d["xml_pending"] is False
+        assert "xml_bruto" not in d
+        # Cursor avança até X-Max-Version pois não há pendência
+        # (ausência de XML NÃO é pendência para NFS-e).
+        assert int(r["cursor_seguro"]) == 42
+        assert mock_get.call_count == 1
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_24b_ausencia_de_xml_nao_bloqueia_cursor(self, mock_get, provider):
+        # 2026-07-31 R2: contrário do teste antigo (24b) — ausência de
+        # XML NÃO bloqueia cursor para NFS-e. O payload já é fonte.
+        listagem = _mock_resp(status=200, headers={"X-Max-Version": "42"},
+                              json_data=[_item_oficial()])
+        mock_get.side_effect = [listagem]
+        r = provider.gov_fetch(
+            {"cnpj": CNPJ_SINTETICO, "tipo": "nfse", "ultimo_nsu": "0"},
+            "trace-24b-r2",
+        )
+        d = r["documentos"][0]
+        assert d["status_xml"] == "ESPELHO_DISPONIVEL"
+        assert d["xml_pending"] is False
+        assert int(r["cursor_seguro"]) == 42
 
 
 # ─────────────────────────────────────────────────────────────────────

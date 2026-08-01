@@ -776,7 +776,14 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
         "codigo_cnae":     codigo_cnae,
         "xinf":            discriminacao[:500] if discriminacao else "",
         # Status/situacao NFSe — nao usar cStat SEFAZ.
-        "status_xml":      "RESUMO",         # promovido a COMPLETO pelo gov_fetch
+        # 2026-07-31 R2: NFS-e recebida da Focus é documento canônico
+        # próprio (não "resumo de NF-e"). O payload da listagem
+        # `/v2/nfsens_recebidas` já é a fonte de entrada do Espelho —
+        # XML é auxiliar. Estado nominal `ESPELHO_DISPONIVEL` sinaliza
+        # ao consumidor que o item pode ser persistido como Espelho
+        # sem depender de XML.
+        "status_xml":      "ESPELHO_DISPONIVEL",
+        "xml_pending":     False,
         "situacao_nfse":   situacao_nfse,
         "situacao_focus":  situacao_raw,     # textual bruta (autorizado etc.)
         "cancelado":       cancelado_r,
@@ -1134,79 +1141,47 @@ class FocusNFeProvider(GovProvider):
             if v_ok > max_versao_itens:
                 max_versao_itens = v_ok
 
-        # ── XML completo por chave / url_xml (Fase E4a + E4c) ────────────
-        # NF-e (E4a): busca XML por chave via GET /v2/nfes_recebidas/{chave}.xml
-        #             quando `nfe_completa=True`.
-        # NFSe: busca XML via `url_xml` do payload; se ausente ou falhar,
-        #       cai para o endpoint oficial GET /v2/nfsens_recebidas/{chave}.xml
-        #       (contrato oficial FocusNFe). Falha individual nunca derruba
-        #       batch — vira RESUMO + xml_pending, preservando `versao` para
-        #       o consumidor bloquear o cursor antes do gap.
-        # CANCELADA (NF-e) nao baixa XML nesta fase — E4b.
-        # NFSe cancelada/substituida não fabrica Espelho a partir do resumo:
-        # vira EVENTO nominal rastreável. A disponibilidade de XML individual
-        # para esses estados permanece não comprovada no ambiente real.
+        # ── XML completo (fluxo NF-e apenas) ────────────────────────────
+        # 2026-07-31 R2 — Correção de premissa estrutural (ADR-0049
+        # retificado): NFS-e NÃO passa mais pelo loop de recuperação
+        # individual de XML. O payload da listagem `/v2/nfsens_recebidas`
+        # é a fonte canônica do EspelhoNFSe (contrato próprio); XML é
+        # auxiliar e opcional. DANFSe permanece sob demanda pelo
+        # endpoint individual (baixar_xml_nfse_por_chave), NUNCA no
+        # loop de importação.
+        #
+        # NF-e (E4a) mantém o contrato original: quando `nfe_completa=True`,
+        # busca XML por chave via GET /v2/nfes_recebidas/{chave}.xml.
+        # CANCELADA NF-e não baixa XML — E4b.
         xml_baixados = 0
         xml_pendentes = 0
-        for doc in documentos:
-            if tipo == "nfse" and (
-                    doc.get("cancelado") == 1 or doc.get("substituido") == 1):
-                doc["status_xml"] = "EVENTO"
-                doc["xml_individual_estado"] = "NAO_COMPROVADO"
-                continue
-            if doc.get("cancelado") == 1:
-                continue
-            if tipo == "nfse":
-                url_xml = doc.get("url_xml")
-                chave_nfse = doc.get("chave") or doc.get("chNFe")
-                # 1) url_xml quando presente. Cap decidido antes de qualquer HTTP.
-                if url_xml:
-                    if xml_baixados >= _XML_BATCH_CAP:
-                        doc["xml_pending"] = True
-                        xml_pendentes += 1
-                        continue
-                    res = self.baixar_xml_nfse(url_xml)
-                    if res.get("ok"):
-                        doc["xml_bruto"]       = res["xml_bruto"]
-                        doc["xml_hash_sha256"] = res["xml_hash_sha256"]
-                        doc["status_xml"]      = "COMPLETO"
-                        xml_baixados += 1
-                        continue
-                # 2) Fallback oficial: /v2/nfsens_recebidas/{chave}.xml.
-                if chave_nfse:
-                    if xml_baixados >= _XML_BATCH_CAP:
-                        doc["xml_pending"] = True
-                        xml_pendentes += 1
-                        continue
-                    res = self.baixar_xml_nfse_por_chave(chave_nfse, ambiente)
-                    if res.get("ok"):
-                        doc["xml_bruto"]       = res["xml_bruto"]
-                        doc["xml_hash_sha256"] = res["xml_hash_sha256"]
-                        doc["status_xml"]      = "COMPLETO"
-                        xml_baixados += 1
-                        continue
-                # Nada baixado — vira pendencia. O consumidor deve bloquear
-                # o cursor antes desta versao ate a reconsulta.
-                doc["xml_pending"] = True
-                xml_pendentes += 1
-                continue
-            # NF-e (fluxo E4a existente)
-            if not doc.get("nfe_completa"):
-                continue
-            if xml_baixados >= _XML_BATCH_CAP:
-                doc["xml_pending"] = True
-                xml_pendentes += 1
-                continue
-            res = self.baixar_xml_completo(doc["chNFe"], ambiente)
-            if res.get("ok"):
-                doc["xml_bruto"]       = res["xml_bruto"]
-                doc["xml_hash_sha256"] = res["xml_hash_sha256"]
-                doc["status_xml"]      = "COMPLETO"
-                doc["xMotivo"]         = "Autorizado"
-                xml_baixados += 1
-            else:
-                doc["xml_pending"] = True
-                xml_pendentes += 1
+        if tipo == "nfse":
+            # NFS-e: nada a fazer no loop de XML. Documentos já vêm com
+            # `status_xml="ESPELHO_DISPONIVEL"` e `xml_pending=False`
+            # do mapper. Cancelada/substituída também são Espelho
+            # canônico (com flag `cancelado`/`substituido` explícita).
+            pass
+        else:
+            for doc in documentos:
+                if doc.get("cancelado") == 1:
+                    continue
+                # NF-e (fluxo E4a existente)
+                if not doc.get("nfe_completa"):
+                    continue
+                if xml_baixados >= _XML_BATCH_CAP:
+                    doc["xml_pending"] = True
+                    xml_pendentes += 1
+                    continue
+                res = self.baixar_xml_completo(doc["chNFe"], ambiente)
+                if res.get("ok"):
+                    doc["xml_bruto"]       = res["xml_bruto"]
+                    doc["xml_hash_sha256"] = res["xml_hash_sha256"]
+                    doc["status_xml"]      = "COMPLETO"
+                    doc["xMotivo"]         = "Autorizado"
+                    xml_baixados += 1
+                else:
+                    doc["xml_pending"] = True
+                    xml_pendentes += 1
 
         # ── Cursor seguro (versao) ───────────────────────────────────────
         # X-Max-Version e X-Total-Count sao os headers oficiais FocusNFe.

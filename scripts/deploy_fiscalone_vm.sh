@@ -61,14 +61,26 @@ rsync -az --delete \
   ./ "${VM_USER}@${VM_HOST}:${VM_PATH}/"
 
 ssh_vm "cd ${VM_PATH} && python3 -m venv .venv && .venv/bin/python -m pip install --upgrade pip >/dev/null && .venv/bin/python -m pip install -r requirements.txt"
-ssh_vm "cat > ${VM_PATH}/.env <<'EENV'
-FISCALONE_AMBIENTE=producao
-FISCALONE_ENABLE_PRODUCAO=1
-MAPONE_FISCAL_PRODUCAO_READY=1
-FISCALONE_DFE_RECEBIDO_ONLY=1
-FISCAL_PROVIDER=sefaz
-EENV
-sudo tee /etc/systemd/system/${VM_SERVICE} >/dev/null <<'ESVC'
+
+# 2026-07-31 R2 — PRESERVAR .env OPERACIONAL DA VM.
+# Comportamento anterior (defeito): o script recriava .env com conteúdo
+# reduzido e removia FISCALONE_M2M_TOKEN, quebrando recuperação
+# individual e DANFSe. Novo contrato: rsync já exclui .env; deploy
+# valida apenas presença das chaves obrigatórias e falha fechado se
+# ausentes. Nunca imprimir valores.
+info "Validando .env preservado (sem exibir valores)..."
+REQUIRED_KEYS="FISCALONE_AMBIENTE FISCALONE_M2M_TOKEN"
+MISSING=$(ssh_vm "if [ ! -f ${VM_PATH}/.env ]; then echo 'ENV_AUSENTE'; exit 0; fi; for k in ${REQUIRED_KEYS}; do grep -q \"^\${k}=\" ${VM_PATH}/.env || echo \$k; done" | tr -d '\r')
+if [ -n "$MISSING" ]; then
+  abort ".env inválido na VM. Chave(s) ausente(s) ou arquivo faltando: $MISSING"
+fi
+# Fingerprint SHA-256 do .env (sem imprimir conteúdo)
+ENV_FP=$(ssh_vm "sha256sum ${VM_PATH}/.env | awk '{print \$1}'" | cut -c1-16)
+info ".env presente; fingerprint SHA-256[:16]=${ENV_FP}"
+# Garantir permissões restritas
+ssh_vm "chmod 600 ${VM_PATH}/.env"
+
+ssh_vm "sudo tee /etc/systemd/system/${VM_SERVICE} >/dev/null <<'ESVC'
 [Unit]
 Description=FiscalOne Gateway Fiscal RLogix
 After=network.target
@@ -78,6 +90,7 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/FiscalOne
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/ubuntu/FiscalOne/.env
 ExecStart=/home/ubuntu/FiscalOne/.venv/bin/python /home/ubuntu/FiscalOne/app.py
 Restart=always
 RestartSec=5
@@ -90,7 +103,6 @@ sudo systemctl enable ${VM_SERVICE} >/dev/null
 sudo systemctl restart ${VM_SERVICE}
 sleep 3
 systemctl is-active ${VM_SERVICE}
-curl -fsS http://127.0.0.1:${VM_PORT}/fiscal/health
-"
+curl -fsS http://127.0.0.1:${VM_PORT}/fiscal/health"
 
 info "Deploy concluido: ${LOCAL_COMMIT}"
