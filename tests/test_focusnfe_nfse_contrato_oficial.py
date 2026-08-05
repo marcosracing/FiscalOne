@@ -353,6 +353,43 @@ class TestXmlIndividualPorChave:
         r = provider.baixar_xml_nfse_por_chave(CHAVE_OK, "homologacao")
         assert r["ok"] is False
         assert r["codigo"] == "FOCUS_XML_CONTENT_TYPE_INVALIDO"
+
+
+class TestJsonIndividualPorChave:
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_json_individual_mapeado_pela_chave(self, mock_get, provider):
+        mock_get.return_value = _mock_resp(
+            status=200,
+            json_data=_item_oficial(),
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            content=b"{}",
+        )
+        r = provider.baixar_json_nfse_por_chave(
+            CHAVE_OK, "homologacao", versao_origem="42",
+        )
+        assert r["ok"] is True
+        assert r["documento"]["chave_nfse"] == CHAVE_OK
+        args, kwargs = mock_get.call_args
+        assert args[0].endswith(f"/v2/nfsens_recebidas/{CHAVE_OK}.json")
+        assert kwargs["headers"]["Accept"] == "application/json"
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_json_individual_rejeita_mime_nao_json(
+            self, mock_get, provider):
+        mock_get.return_value = _mock_resp(
+            status=200, headers={"Content-Type": "text/html"},
+            content=b"<html>erro</html>",
+        )
+        r = provider.baixar_json_nfse_por_chave(CHAVE_OK)
+        assert r["ok"] is False
+        assert r["codigo"] == "FOCUS_NFSE_JSON_MIME_INVALIDO"
+
+    @patch("providers.focusnfe_provider.requests.get")
+    def test_json_individual_404_nominal(self, mock_get, provider):
+        mock_get.return_value = _mock_resp(status=404)
+        r = provider.baixar_json_nfse_por_chave(CHAVE_OK)
+        assert r["ok"] is False
+        assert r["codigo"] == "FOCUS_NFSE_JSON_NAO_ENCONTRADO"
         assert "xml_bruto" not in r
 
     @patch("providers.focusnfe_provider.requests.get")

@@ -1076,6 +1076,64 @@ def xml_por_chave():
     return resp
 
 
+# ── POST /fiscal/nfse/recebida/json ────────────────────────────────────────────
+
+@app.route("/fiscal/nfse/recebida/json", methods=["POST"])
+def nfse_recebida_json():
+    """Recupera JSON individual NFS-e por chave real via FocusNFe."""
+    trace_id = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+    ok_m2m, codigo_m2m, status_m2m = _m2m_check(request)
+    if not ok_m2m:
+        return jsonify({"ok": False, "trace_id": trace_id,
+                        "codigo": codigo_m2m,
+                        "erro": "Acesso M2M nao autorizado."}), status_m2m
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "trace_id": trace_id,
+                        "codigo": "PAYLOAD_INVALIDO",
+                        "erro": "Payload JSON obrigatorio."}), 400
+    token = payload.pop("focusnfe_token", None)
+    chave = str(payload.get("chave_acesso_nfse") or "").strip()
+    ambiente = str(payload.get("ambiente") or "producao").strip().lower()
+    versao_origem = payload.get("versao_origem")
+    if not chave or len(chave) > _NFSE_IDENT_MAX or _CONTROL_CHARS_RE.search(chave):
+        return jsonify({"ok": False, "trace_id": trace_id,
+                        "codigo": "CHAVE_INVALIDA",
+                        "erro": "chave de acesso NFS-e invalida."}), 400
+    if ambiente not in ("producao", "homologacao"):
+        return jsonify({"ok": False, "trace_id": trace_id,
+                        "codigo": "AMBIENTE_INVALIDO",
+                        "erro": "ambiente invalido."}), 400
+    if not token:
+        return jsonify({"ok": False, "trace_id": trace_id,
+                        "codigo": "FOCUS_TOKEN_AUSENTE",
+                        "erro": "Token FocusNFe obrigatorio."}), 400
+    from providers.focusnfe_provider import FocusNFeProvider
+    res = FocusNFeProvider(token=token).baixar_json_nfse_por_chave(
+        chave, ambiente=ambiente, versao_origem=versao_origem,
+    )
+    token = None
+    if not res.get("ok"):
+        codigo = str(res.get("codigo") or "FOCUS_NFSE_JSON_HTTP_ERROR")
+        status = {
+            "FOCUS_NFSE_JSON_NAO_ENCONTRADO": 404,
+            "FOCUS_NFSE_JSON_RATE_LIMIT": 429,
+            "FOCUS_NFSE_JSON_TIMEOUT": 504,
+            "FOCUS_NFSE_JSON_AUTH_ERROR": 502,
+        }.get(codigo, 502)
+        _log_stdout("nfse_recebida_json", "erro", trace_id,
+                    source_system=source_system, erro_msg=codigo)
+        return jsonify({"ok": False, "trace_id": trace_id,
+                        "codigo": codigo,
+                        "erro": str(res.get("erro") or "Falha JSON NFS-e.")}), status
+    _log_stdout("nfse_recebida_json", "ok", trace_id,
+                source_system=source_system)
+    return jsonify({"ok": True, "trace_id": trace_id,
+                    "provider": "focusnfe",
+                    "documento": res["documento"]}), 200
+
+
 # ── POST /fiscal/nfse/recebida/danfse ─────────────────────────────────────────
 # DANFSe HTML da NFS-e recebida via FocusNFe. Fluxo:
 #   Browser MapOne → rota autenticada MapOne → FiscalOne (M2M) → FocusNFe.

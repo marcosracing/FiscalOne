@@ -1224,6 +1224,14 @@ da Focus mascare documentos válidos como ausência de nota.
 
 Handoff:
 `docs/adr/_handoff/2026-07-31-focusnfe-nfse-dps-nacional.md`.
+
+### JSON individual NFS-e recebida (2026-08-04)
+
+O contrato M2M `POST /fiscal/nfse/recebida/json` aceita somente
+`chave_acesso_nfse` nominal e consulta a FocusNFe em
+`GET /v2/nfsens_recebidas/{chave}.json`. A operação usa Basic Auth,
+timeout, limite de 2 MiB e validação de status, MIME e objeto JSON. O
+payload passa pelo mapper NFS-e; token e resposta bruta não são expostos.
 ## 2026-08-01 — Prestador no layout DPS Nacional
 
 No layout DPS observado, `cnpj_prestador` identifica o prestador e sua razão

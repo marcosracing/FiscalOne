@@ -23,6 +23,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import urllib.parse
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -2003,6 +2004,101 @@ class FocusNFeProvider(GovProvider):
             "xml_hash_sha256": res["xml_hash_sha256"],
             "tamanho":         res["tamanho"],
         }
+
+    def baixar_json_nfse_por_chave(self, chave: str,
+                                    ambiente: str | None = None,
+                                    versao_origem=None) -> dict:
+        """Consulta a NFS-e Nacional individual em JSON.
+
+        Endpoint oficial FocusNFe:
+        ``GET /v2/nfsens_recebidas/{chave}.json``.
+        A chave deve vir nominalmente de ``chave_nfse``; numero_dfse e
+        id_dps não são aceitos pelo caller como substitutos.
+        """
+        chave_s = str(chave or "").strip()
+        if not re.match(r"^[A-Za-z0-9._-]{1,200}$", chave_s):
+            return {"ok": False, "provider": "focusnfe",
+                    "codigo": "FOCUS_BAD_REQUEST",
+                    "erro": "chave NFS-e invalida."}
+        try:
+            token = self._require_token()
+        except RuntimeError as exc:
+            return {"ok": False, "provider": "focusnfe",
+                    "codigo": "FOCUS_TOKEN_AUSENTE", "erro": str(exc)}
+        url = (f"{self._base_url_for(ambiente)}"
+               f"/v2/nfsens_recebidas/{chave_s}.json")
+        try:
+            resp = requests.get(
+                url,
+                headers={**_basic_auth_header(token),
+                         "Accept": "application/json"},
+                allow_redirects=False,
+                timeout=self._timeout,
+            )
+        except requests.exceptions.Timeout:
+            return {"ok": False, "provider": "focusnfe",
+                    "codigo": "FOCUS_NFSE_JSON_TIMEOUT",
+                    "erro": "Timeout consultando JSON NFS-e."}
+        except requests.exceptions.RequestException as exc:
+            return {"ok": False, "provider": "focusnfe",
+                    "codigo": "FOCUS_NFSE_JSON_REQUEST_ERROR",
+                    "erro": f"Erro HTTP: {type(exc).__name__}."}
+        finally:
+            try:
+                del token
+            except NameError:
+                pass
+
+        if resp.status_code == 404:
+            return {"ok": False, "provider": "focusnfe",
+                    "codigo": "FOCUS_NFSE_JSON_NAO_ENCONTRADO",
+                    "erro": "JSON individual NFS-e nao encontrado.",
+                    "http_status": 404}
+        if resp.status_code in (401, 403):
+            return {"ok": False, "provider": "focusnfe",
+                    "codigo": "FOCUS_NFSE_JSON_AUTH_ERROR",
+                    "erro": "Credencial rejeitada pela FocusNFe.",
+                    "http_status": resp.status_code}
+        if resp.status_code == 429:
+            return {"ok": False, "provider": "focusnfe",
+                    "codigo": "FOCUS_NFSE_JSON_RATE_LIMIT",
+                    "erro": "Rate limit no JSON individual NFS-e.",
+                    "http_status": 429}
+        if resp.status_code != 200:
+            return {"ok": False, "provider": "focusnfe",
+                    "codigo": "FOCUS_NFSE_JSON_HTTP_ERROR",
+                    "erro": f"Upstream devolveu {resp.status_code}.",
+                    "http_status": resp.status_code}
+        mime = (resp.headers.get("Content-Type") or "").split(";", 1)[0].lower()
+        if mime != "application/json":
+            return {"ok": False, "provider": "focusnfe",
+                    "codigo": "FOCUS_NFSE_JSON_MIME_INVALIDO",
+                    "erro": "Content-Type inesperado no JSON NFS-e."}
+        if len(resp.content or b"") > 2 * 1024 * 1024:
+            return {"ok": False, "provider": "focusnfe",
+                    "codigo": "FOCUS_NFSE_JSON_MUITO_GRANDE",
+                    "erro": "JSON individual excede 2 MiB."}
+        try:
+            payload = resp.json()
+        except ValueError:
+            return {"ok": False, "provider": "focusnfe",
+                    "codigo": "FOCUS_NFSE_JSON_INVALIDO",
+                    "erro": "Resposta individual nao e JSON valido."}
+        if not isinstance(payload, dict):
+            return {"ok": False, "provider": "focusnfe",
+                    "codigo": "FOCUS_NFSE_JSON_SCHEMA_INVALIDO",
+                    "erro": "JSON individual deve ser objeto."}
+        if payload.get("versao") is None and versao_origem is not None:
+            payload = dict(payload)
+            payload["versao"] = versao_origem
+        try:
+            documento = _mapear_nfse_focus(payload, "nfse-json-individual")
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "provider": "focusnfe",
+                    "codigo": "FOCUS_NFSE_JSON_SCHEMA_INVALIDO",
+                    "erro": str(exc)[:300]}
+        return {"ok": True, "provider": "focusnfe",
+                "documento": documento, "http_status": 200}
 
     # ── baixar_xml_cte_por_chave — CT-e por chave (Fase G0.2a) ─────────
     def baixar_xml_cte_por_chave(self, chave: str,

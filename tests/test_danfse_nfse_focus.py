@@ -354,3 +354,40 @@ class TestRotaDanfseM2M:
         assert r.status_code == 502
         # O corpo do erro nunca deve conter o token.
         assert b"supersecret123" not in r.data
+
+
+class TestRotaJsonNfseM2M:
+    def test_json_sem_m2m_401(self, app_client):
+        r = app_client.post(
+            "/fiscal/nfse/recebida/json",
+            json={"chave_acesso_nfse": "A" * 44,
+                  "focusnfe_token": "x"},
+        )
+        assert r.status_code == 401
+
+    @patch("providers.focusnfe_provider.FocusNFeProvider.baixar_json_nfse_por_chave")
+    def test_json_sucesso_repassa_documento(self, baixar, app_client):
+        baixar.return_value = {
+            "ok": True, "documento": {"chave_nfse": "A" * 44},
+        }
+        r = app_client.post(
+            "/fiscal/nfse/recebida/json", headers=_hdrs(),
+            json={"chave_acesso_nfse": "A" * 44,
+                  "ambiente": "producao", "focusnfe_token": "segredo"},
+        )
+        assert r.status_code == 200
+        assert r.get_json()["documento"]["chave_nfse"] == "A" * 44
+        assert b"segredo" not in r.data
+
+    @patch("providers.focusnfe_provider.FocusNFeProvider.baixar_json_nfse_por_chave")
+    def test_json_404_nominal(self, baixar, app_client):
+        baixar.return_value = {
+            "ok": False, "codigo": "FOCUS_NFSE_JSON_NAO_ENCONTRADO",
+            "erro": "nao encontrado",
+        }
+        r = app_client.post(
+            "/fiscal/nfse/recebida/json", headers=_hdrs(),
+            json={"chave_acesso_nfse": "A" * 44,
+                  "focusnfe_token": "x"},
+        )
+        assert r.status_code == 404

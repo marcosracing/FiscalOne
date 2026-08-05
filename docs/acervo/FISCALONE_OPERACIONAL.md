@@ -327,3 +327,10 @@ código**. Handoff:
 
 Adicionado fallback nominal `razao_social_emitente`/`nome_fantasia_emitente`
 para `emit_nome` no mapper DPS Nacional, comprovado por teste sintético.
+
+## 2026-08-04 — JSON individual NFS-e por chave
+
+- Adicionado endpoint individual JSON no provider e rota M2M para o MapOne.
+- Somente chave nominal é aceita; número e ID DPS não substituem a chave.
+- HTTP, MIME, tamanho e JSON inválido produzem erros nominais.
+- Sem deploy ou chamada real à FocusNFe nesta rodada.
