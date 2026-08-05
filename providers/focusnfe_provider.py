@@ -1098,6 +1098,10 @@ class FocusNFeProvider(GovProvider):
                 }
                 if chave_pre:
                     entry["chave"] = chave_pre
+                    if tipo == "nfse":
+                        entry["chave_acesso_nfse"] = chave_pre
+                entry["type"] = tipo
+                entry["doc_type"] = tipo
                 erros.append(entry)
                 erros_sem_versao += 1
                 continue
@@ -1127,6 +1131,12 @@ class FocusNFeProvider(GovProvider):
                     erros_sem_versao += 1
                 if chave_pre:
                     entry["chave"] = chave_pre
+                    if tipo == "nfse":
+                        entry["chave_acesso_nfse"] = chave_pre
+                entry["type"] = tipo
+                entry["doc_type"] = tipo
+                if versao_pre is not None:
+                    entry["nsu"] = str(versao_pre)
                 erros.append(entry)
                 continue
 

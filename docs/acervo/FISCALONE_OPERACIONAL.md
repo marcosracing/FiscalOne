@@ -334,3 +334,10 @@ para `emit_nome` no mapper DPS Nacional, comprovado por teste sintético.
 - Somente chave nominal é aceita; número e ID DPS não substituem a chave.
 - HTTP, MIME, tamanho e JSON inválido produzem erros nominais.
 - Sem deploy ou chamada real à FocusNFe nesta rodada.
+
+## 2026-08-05 — Erro de mapper NFS-e recuperável por chave
+
+- Erros de mapper preservam chave NFS-e nominal, tipo documental e versão
+  para o fallback individual do MapOne.
+- O contrato não expõe item bruto, token, número da NFS-e ou ID DPS como
+  substitutos da chave.

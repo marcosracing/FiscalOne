@@ -1232,6 +1232,11 @@ O contrato M2M `POST /fiscal/nfse/recebida/json` aceita somente
 `GET /v2/nfsens_recebidas/{chave}.json`. A operação usa Basic Auth,
 timeout, limite de 2 MiB e validação de status, MIME e objeto JSON. O
 payload passa pelo mapper NFS-e; token e resposta bruta não são expostos.
+
+Quando um item da listagem falha no mapper, o envelope de erro NFS-e
+preserva nominalmente `chave_acesso_nfse`, `doc_type` e versão/NSU. Isso
+permite ao MapOne consultar o JSON individual sem promover número da nota
+ou ID DPS a chave. O payload bruto continua fora do envelope.
 ## 2026-08-01 — Prestador no layout DPS Nacional
 
 No layout DPS observado, `cnpj_prestador` identifica o prestador e sua razão

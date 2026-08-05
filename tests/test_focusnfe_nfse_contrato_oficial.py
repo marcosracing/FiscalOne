@@ -303,6 +303,10 @@ class TestGovFetchListagemOficial:
         assert r["ok"] is True
         assert len(r["erros"]) >= 1
         assert int(r["cursor_seguro"]) <= 10
+        erro = next(e for e in r["erros"] if e.get("versao") == 11)
+        assert erro["chave_acesso_nfse"] == "B" * 44
+        assert erro["doc_type"] == "nfse"
+        assert erro["nsu"] == "11"
 
     @patch("providers.focusnfe_provider.requests.get")
     def test_20_lista_vazia_nao_regride_e_nao_mistura_nfe(
