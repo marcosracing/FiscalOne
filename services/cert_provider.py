@@ -8,11 +8,18 @@ ADR-0035 · Regras invioláveis:
       1. cert_pfx_base64 + cert_password no payload (fonte "inline_base64").
       2. env GOV_CERT_PATH + GOV_CERT_PASSWORD (apenas homologação/teste local).
   - Integridade obrigatória: CNPJ embutido no cert deve bater com a tenant.
+
+ADR-0051 Fase 2B.2 · custódia proporcional:
+  - Caminho por env (FISCALONE_CERT_PFX_PATH/GOV_CERT_PATH) é validado por
+    services.secure_paths.validate_pfx_path antes de qualquer read_bytes:
+    allowlist, arquivo regular, sem symlink, sem travessia, permissão 0o600.
 """
 import base64
 import os
 import re
 from pathlib import Path
+
+from services.secure_paths import SecurePathError, validate_pfx_path
 
 
 class CertResolveError(RuntimeError):
@@ -104,12 +111,10 @@ def _read_env_pfx():
     path = _env("FISCALONE_CERT_PFX_PATH", "GOV_CERT_PATH")
     if not path:
         return None, None, "sem_env"
-    p = Path(path)
-    if not p.exists():
-        raise CertResolveError(
-            "CERT_ENV_INVALIDO",
-            "Caminho do PFX configurado no ambiente, mas arquivo nao encontrado",
-        )
+    try:
+        p = validate_pfx_path(path)
+    except SecurePathError as exc:
+        raise CertResolveError(exc.codigo, exc.mensagem) from None
     senha = _env("FISCALONE_CERT_PASSWORD", "GOV_CERT_PASSWORD", "GOV_CERT_PASS")
     tag   = "env_path" if os.environ.get("FISCALONE_CERT_PFX_PATH") else "env_path_legacy"
     return p.read_bytes(), senha.encode("utf-8") if senha else b"", tag
