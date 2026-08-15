@@ -1515,5 +1515,132 @@ def status_sefaz(uf):
         return _bloqueio_producao("status_sefaz", trace_id, source_system)
     return _provider_response("status_sefaz", get_provider().status_sefaz(uf))
 
+
+# ── ADR-0051 Fase 2D — Receptor público de webhooks FocusNFe ─────────
+#
+# ADR-0035: FiscalOne é ponte estateless. Este endpoint NÃO persiste;
+# apenas autentica, valida envelope mínimo e delega ao MapOne via M2M
+# canônico (ADR-0029, X-Source-System=fiscalone). MapOne detém a
+# configuração (identifier → tenant + token_hash), grava a custódia
+# e resolve tenant.
+#
+# Método: POST (confirmado no enum público Focus).
+# URL: /webhooks/focusnfe/<identifier>/<event>
+# Auth: header customizado nomeado pelo integrador. O nome e o
+#   valor do header são enviados ao MapOne, que decide.
+# Retry Focus: 1min/30min/1h/3h/24h — se MapOne responder 2xx,
+#   Focus não retenta.
+#
+# Payload real do webhook Focus não está publicamente documentado
+# (WebFetch em `doc.focusnfe.com.br/reference/*` retornou 404 ou
+# apenas metadados de gestão). Portanto preservamos o corpo íntegro
+# e delegamos; o extrator heurístico de chave vive no MapOne.
+import base64
+import json as _webhook_json
+import urllib.request
+
+_MAPONE_INBOUND_URL = os.environ.get(
+    "MAPONE_WEBHOOK_INBOUND_URL",
+    "https://mapone.rlog.com.br/fiscal/api/webhook/focusnfe/inbound",
+)
+_MAPONE_INBOUND_TOKEN = os.environ.get("MAPONE_WEBHOOK_INBOUND_TOKEN", "")
+
+_WEBHOOK_EVENTOS_PERMITIDOS = frozenset({
+    "nfe_recebida",
+    "nfe_recebida_falha_consulta",
+    "nfse_recebida",
+    "cte_recebida",
+})
+
+_WEBHOOK_MAX_PAYLOAD_BYTES = 262_144  # 256 KiB
+
+
+def _webhook_erro(codigo: str, http: int, trace_id: str):
+    """Erro nominal — não revela config, token ou detalhes internos."""
+    logger.info("focusnfe-webhook trace=%s codigo=%s http=%d",
+                trace_id, codigo, http)
+    return jsonify({"ok": False, "codigo": codigo, "trace_id": trace_id}), http
+
+
+@app.route("/webhooks/focusnfe/<identifier>/<event>", methods=["POST"])
+def focusnfe_webhook_receptor(identifier: str, event: str):
+    trace_id = _trace(request)
+    if not identifier or len(identifier) > 64:
+        return _webhook_erro("IDENTIFIER_INVALIDO", 400, trace_id)
+    if event not in _WEBHOOK_EVENTOS_PERMITIDOS:
+        return _webhook_erro("EVENTO_NAO_PERMITIDO", 404, trace_id)
+
+    ctype = (request.content_type or "").split(";")[0].strip().lower()
+    if ctype != "application/json":
+        return _webhook_erro("CONTENT_TYPE_INVALIDO", 415, trace_id)
+
+    raw = request.get_data(cache=False, as_text=False) or b""
+    if not raw:
+        return _webhook_erro("PAYLOAD_VAZIO", 400, trace_id)
+    if len(raw) > _WEBHOOK_MAX_PAYLOAD_BYTES:
+        return _webhook_erro("PAYLOAD_EXCESSIVO", 413, trace_id)
+
+    try:
+        parsed = _webhook_json.loads(raw.decode("utf-8"))
+        if not isinstance(parsed, dict):
+            raise ValueError("payload não é objeto JSON")
+    except Exception:
+        return _webhook_erro("JSON_INVALIDO", 400, trace_id)
+
+    # Nome do header customizado é decidido pelo integrador no painel
+    # Focus (campos authorization_header + authorization). Aqui não
+    # sabemos qual é — procuramos o header enviado que casa com um dos
+    # que o MapOne configurou. Como não temos a config aqui (ADR-0035),
+    # encaminhamos TODOS os headers customizados de autenticação para
+    # o MapOne decidir.
+    #
+    # Convenção prática: se o painel Focus foi cadastrado com
+    # `authorization_header=X-Focus-Webhook-Token`, esse é o padrão.
+    # Extraímos os candidatos mais prováveis.
+    auth_headers_candidatos = {}
+    for h_name in ("X-Focus-Webhook-Token", "Authorization",
+                   "X-Webhook-Token", "X-Focus-Token"):
+        v = request.headers.get(h_name)
+        if v is not None:
+            auth_headers_candidatos[h_name] = v
+
+    body = {
+        "identifier":            identifier,
+        "event":                 event,
+        "payload_raw_b64":       base64.b64encode(raw).decode("ascii"),
+        "authorization_value":   next(iter(auth_headers_candidatos.values()), ""),
+        "authorization_header":  next(iter(auth_headers_candidatos.keys()), ""),
+        "trace_id":              trace_id,
+    }
+    try:
+        req = urllib.request.Request(
+            _MAPONE_INBOUND_URL,
+            data=_webhook_json.dumps(body).encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type":     "application/json",
+                "X-Source-System":  "fiscalone",
+                "X-Source-Token":   _MAPONE_INBOUND_TOKEN,
+                "X-Trace-Id":       trace_id,
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            status = resp.getcode() or 502
+    except urllib.error.HTTPError as e:
+        status = e.code
+    except Exception:
+        return _webhook_erro("MAPONE_INDISPONIVEL", 502, trace_id)
+
+    if 200 <= status < 300:
+        return jsonify({"ok": True, "trace_id": trace_id}), 202
+    if status == 401:
+        return _webhook_erro("TOKEN_INVALIDO", 401, trace_id)
+    if status == 403:
+        return _webhook_erro("EVENTO_NAO_HABILITADO", 403, trace_id)
+    if status == 413:
+        return _webhook_erro("PAYLOAD_EXCESSIVO", 413, trace_id)
+    return _webhook_erro("MAPONE_ERRO", 502, trace_id)
+
+
 if __name__ == "__main__":
     app.run(port=5002, debug=False, threaded=True)
