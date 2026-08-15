@@ -1549,6 +1549,7 @@ _WEBHOOK_EVENTOS_PERMITIDOS = frozenset({
     "nfe_recebida",
     "nfe_recebida_falha_consulta",
     "nfse_recebida",
+    "nfsen_recebida",   # NFS-e Nacional recebida (ADR-0051 Fase 2D-R1)
     "cte_recebida",
 })
 
