@@ -9,3 +9,6 @@ wallet/
 *.sso
 logs/
 run/
+
+# macOS
+.DS_Store
