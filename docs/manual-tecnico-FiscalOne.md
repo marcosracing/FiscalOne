@@ -1243,3 +1243,36 @@ No layout DPS observado, `cnpj_prestador` identifica o prestador e sua razão
 social pode ser publicada como `razao_social_emitente`. O mapper NFS-e converte
 esse campo para `emit_nome`, preservando a prioridade dos aliases explícitos de
 prestador e sem confundir o emitente/prestador com o tomador.
+
+## Endurecimento do script de rollout FiscalOne (2026-08-17)
+
+Preparação do Deploy D1 (webhook + SCI). O script canônico
+`scripts/deploy_fiscalone_vm.sh` foi endurecido para paridade com o
+script MapOne já validado:
+
+- **Backup pré-deploy** em `/home/ubuntu/backups/FiscalOne_pre_deploy_
+  YYYYMMDD_HHMMSS.tar.gz`, com exclusão de `.venv`, `logs`, `run`,
+  `__pycache__`, `.env`, `.env.*` e `wallet/`. O tar é validado com
+  `tar -tzf`; se corromper, aborta preservando todos os backups
+  anteriores.
+- **Retenção 2** aplicada somente **depois** da validação: apenas os 2
+  backups mais recentes ficam; erro na remoção aborta sem tocar em
+  arquivos que ainda existem.
+- **`DEPLOY_BUILD`** gravado após o rsync, com `commit`, `subject`,
+  `version` (se houver `VERSION`), `deployed_at_utc` e
+  `deployed_from=dev-mac`.
+- **`.env` preservado** — rsync exclui; a validação apenas confere
+  presença das chaves obrigatórias (`FISCALONE_AMBIENTE`,
+  `FISCALONE_M2M_TOKEN`). Fingerprint/hash não é mais impresso.
+- **Confirmação não-interativa** via `DEPLOY_CONFIRM=DEPLOY` (mantém
+  prompt manual quando ausente).
+- **Health + journal** — `/fiscal/health` e últimas 20 linhas do
+  systemd após o restart.
+- Nenhuma alteração fiscal: `emissao_ativa` permanece `false`,
+  `emissao_bloqueada_por_design` permanece `true`, `escopo_liberado`
+  segue `dfe_recebido_apenas`. Nenhum provider emissor ativado.
+  Nenhum token cadastrado. Nenhuma migration executada (o serviço
+  não possui runner próprio).
+
+Rollback: restaurar o backup validado da rodada e reiniciar apenas
+`fiscalone.service`.
