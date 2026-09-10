@@ -607,7 +607,9 @@ class TestBaixarDanfe:
         mock_get.side_effect = requests.exceptions.Timeout()
         r = provider_com_token.baixar_danfe("A" * 44)
         assert r["ok"] is False
-        assert r["codigo"] == "DANFE_REQUEST_ERROR"
+        # Gate ESPELHO-GRAFICO (2026-09-10): timeout passou a ter código
+        # próprio, como no DANFSe — antes caía em DANFE_REQUEST_ERROR.
+        assert r["codigo"] == "DANFE_TIMEOUT"
 
     @patch("providers.focusnfe_provider.requests.get")
     def test_erro_no_download_presigned(self, mock_get, provider_com_token):

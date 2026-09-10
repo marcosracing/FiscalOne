@@ -1308,6 +1308,112 @@ def nfse_recebida_danfse():
     return resp
 
 
+# ── Espelho gráfico PDF: DANFE (NF-e) e DACTE (CT-e) ─────────────────────────
+# Gate ESPELHO-GRAFICO (2026-09-10). Mesmo contrato do DANFSe: M2M primeiro,
+# provider FocusNFe, resposta = bytes exatos do PDF, erro em envelope JSON.
+# FiscalOne stateless — nada é persistido (decisão de Marcos: "busca na Focus
+# todas as vezes, será pouco uso").
+
+
+def _status_para_codigo_pdf(codigo: str) -> int:
+    """Código do provider (DANFE_/DACTE_) → HTTP status desta rota."""
+    if codigo.endswith("_NAO_ENCONTRADO"):
+        return 404
+    if codigo.endswith("_TIMEOUT"):
+        return 504
+    if codigo in ("FOCUS_BAD_REQUEST", "FOCUS_TOKEN_AUSENTE"):
+        return 400
+    return 502
+
+
+def _espelho_pdf(doc_type: str, operacao: str, prefixo: str):
+    """Corpo comum das rotas de DANFE e DACTE."""
+    trace_id      = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+
+    ok_m2m, m2m_codigo, m2m_status = _m2m_check(request)
+    if not ok_m2m:
+        _log_stdout(operacao, "erro", trace_id, source_system=source_system,
+                    erro_msg=m2m_codigo)
+        return jsonify({
+            "ok": False, "trace_id": trace_id, "codigo": m2m_codigo,
+            "erro": ("Servidor sem M2M configurado."
+                     if m2m_codigo == "M2M_NAO_CONFIGURADO"
+                     else "Token M2M ausente ou invalido."),
+        }), m2m_status
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict) or not payload:
+        return jsonify({"ok": False, "trace_id": trace_id, "codigo": "PAYLOAD_INVALIDO",
+                        "erro": "Payload JSON obrigatorio."}), 400
+
+    focusnfe_token = payload.pop("focusnfe_token", None)
+    for proibido in ("Authorization", "authorization", "cert_pfx_base64", "cert_password"):
+        payload.pop(proibido, None)
+
+    chave    = str(payload.get("chave") or "").strip()
+    provider = str(payload.get("provider") or "").strip().lower()
+    ambiente = str(payload.get("ambiente") or "producao").strip().lower()
+
+    if provider != "focusnfe":
+        return jsonify({"ok": False, "trace_id": trace_id, "codigo": "PROVIDER_NAO_SUPORTADO",
+                        "erro": f"{prefixo} disponivel apenas via FocusNFe."}), 400
+    if not chave or len(chave) > 80 or _CONTROL_CHARS_RE.search(chave):
+        return jsonify({"ok": False, "trace_id": trace_id, "codigo": "CHAVE_INVALIDA",
+                        "erro": "chave invalida."}), 400
+    if ambiente not in ("producao", "homologacao"):
+        return jsonify({"ok": False, "trace_id": trace_id, "codigo": "AMBIENTE_INVALIDO",
+                        "erro": "ambiente deve ser 'producao' ou 'homologacao'."}), 400
+    if not focusnfe_token:
+        return jsonify({"ok": False, "trace_id": trace_id, "codigo": "FOCUS_TOKEN_AUSENTE",
+                        "erro": "Token FocusNFe obrigatorio no payload."}), 400
+
+    from providers.focusnfe_provider import FocusNFeProvider
+    provider_obj = FocusNFeProvider(token=focusnfe_token)
+    metodo = provider_obj.baixar_danfe if doc_type == "nfe" else provider_obj.baixar_dacte
+    res = metodo(chave, ambiente=ambiente)
+
+    if not res.get("ok"):
+        codigo = str(res.get("codigo") or f"{prefixo}_UNEXPECTED_HTTP")
+        _log_stdout(operacao, "erro", trace_id, source_system=source_system,
+                    erro_msg=codigo)
+        envelope = {"ok": False, "trace_id": trace_id, "codigo": codigo,
+                    "erro": str(res.get("erro") or f"Falha na consulta {prefixo}.")}
+        if res.get("http_status") is not None:
+            envelope["http_status_upstream"] = int(res["http_status"])
+        return jsonify(envelope), _status_para_codigo_pdf(codigo)
+
+    body: bytes = res["bytes"]
+    _log_stdout(operacao, "ok", trace_id, source_system=source_system,
+                tamanho=len(body))
+    resp = app.response_class(response=body, status=200, mimetype="application/pdf")
+    resp.headers["X-Trace-Id"]             = trace_id
+    resp.headers["X-RLogix-Provider"]      = "focusnfe"
+    resp.headers["X-RLogix-Ambiente"]      = ambiente
+    resp.headers["X-RLogix-Content-SHA256"] = res.get("sha256", "")
+    resp.headers["Cache-Control"]          = "private, no-store"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Content-Length"]         = str(len(body))
+    return resp
+
+
+@app.route("/fiscal/nfe/recebida/danfe", methods=["POST"])
+def nfe_recebida_danfe():
+    """DANFE (PDF) de NF-e recebida via FocusNFe. Ver `_espelho_pdf`."""
+    return _espelho_pdf("nfe", "nfe_recebida_danfe", "DANFE")
+
+
+@app.route("/fiscal/cte/recebida/dacte", methods=["POST"])
+def cte_recebida_dacte():
+    """DACTE (PDF) de CT-e recebido via FocusNFe.
+
+    Só vale para CT-e **recebido** contra o CNPJ; CT-e de receita (emitido
+    pelo próprio tenant) não está em `ctes_recebidas` — decisão de Marcos
+    em 2026-09-10: esses não precisam de DACTE por aqui.
+    """
+    return _espelho_pdf("cte", "cte_recebida_dacte", "DACTE")
+
+
 # ── POST /fiscal/nfe/recebida/manifesto ───────────────────────────────────────
 
 @app.route("/fiscal/nfe/recebida/manifesto", methods=["POST"])

@@ -112,6 +112,44 @@ def _xml_redirect_location_permitida(location: str, original_url: str) -> bool:
     return destino.hostname.lower() in permitidos
 
 
+def _redirect_pdf_seguro(location: str) -> bool:
+    """Higiene do redirect do espelho gráfico em PDF (DANFE/DACTE).
+
+    Diferente do XML: a Focus redireciona o PDF para o **storage**, que é
+    outro domínio (a allowlist de `_xml_redirect_location_permitida`
+    recusaria toda abertura). Aqui a defesa é outra e explícita:
+
+      - só HTTPS, porta padrão, sem credencial embutida, sem fragmento;
+      - o segundo GET **nunca** leva Authorization (regra do chamador);
+      - o corpo é validado por MIME **e** pelos bytes mágicos ``%PDF-``;
+      - o conteúdo é apenas repassado ao navegador, nunca parseado nem
+        persistido — decisão de Marcos (2026-09-10): sem custódia.
+
+    Para restringir por host, basta popular a env de allowlist do XML:
+    quando ela tiver valor, o host do redirect precisa constar nela.
+    """
+    try:
+        destino = urllib.parse.urlsplit(location)
+        porta = destino.port
+    except (TypeError, ValueError):
+        return False
+    if (
+        destino.scheme.lower() != "https"
+        or not destino.hostname
+        or destino.username is not None
+        or destino.password is not None
+        or destino.fragment
+        or porta not in (None, 443)
+    ):
+        return False
+    permitidos = {
+        host.strip().lower()
+        for host in os.environ.get(_XML_REDIRECT_HOSTS_ENV, "").split(",")
+        if host.strip()
+    }
+    return (destino.hostname.lower() in permitidos) if permitidos else True
+
+
 def _normalizar_base_url(base_url: str) -> str:
     """Remove barra final e sufixo `/v2` para garantir montagem correta.
 
@@ -1438,103 +1476,131 @@ class FocusNFeProvider(GovProvider):
         }
         return self.gov_fetch(payload, trace_id)
 
-    # ── baixar_danfe — HTTP real, redirect 302 sem Authorization ──────────
-    def baixar_danfe(self, chave: str, ambiente: str | None = None) -> dict:
-        """Baixa DANFE PDF da FocusNFe.
+    # ── Espelho gráfico em PDF: DANFE (NF-e) e DACTE (CT-e) ──────────────
+    # Gate ESPELHO-GRAFICO (2026-09-10). O `baixar_danfe` original existia
+    # desde julho sem rota e sem as proteções que o DANFSe já tinha
+    # (allowlist de host no redirect, MIME obrigatório, limite de bytes).
+    # Os dois PDFs passam pelo mesmo caminho endurecido; o DANFSe segue no
+    # método próprio porque devolve HTML.
+    _PDF_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB — defesa contra flood
+    _PDF_ACCEPT = "application/pdf"
+    _PDF_PATH = {"nfe": "nfes_recebidas", "cte": "ctes_recebidas"}
 
-        Fluxo:
-          1. GET {base_url}/nfes_recebidas/{chave}.pdf COM Authorization,
-             allow_redirects=False.
-          2. Se 302, ler Location; segundo GET SEM Authorization.
-          3. Se 200 direto, aceitar bytes.
-          4. Calcular sha256, mime, tamanho.
+    def _baixar_pdf_por_chave(self, doc_type: str, chave: str,
+                              ambiente: str | None, prefixo_erro: str) -> dict:
+        """Baixa o espelho gráfico PDF de um documento recebido.
 
-        Retorno OK: {ok, bytes, sha256, mime, tamanho}
-        Retorno erro: envelope com codigo controlado.
+        Endpoints oficiais (consultados em 2026-09-10):
+          ``GET {base}/v2/nfes_recebidas/{chave}.pdf``  — DANFE
+          ``GET {base}/v2/ctes_recebidas/{chave}.pdf``  — DACTE
+        Ambos respondem **302** para a URL pré-assinada do storage; o
+        segundo GET nunca leva Authorization.
+
+        Envelope de sucesso: ``{ok, provider, bytes, sha256, mime, tamanho}``.
+        Erros nominais usam ``prefixo_erro`` (DANFE_/DACTE_), nunca expõem
+        token nem detalhe de driver.
         """
+        import re as _re
+
+        caminho = self._PDF_PATH.get(doc_type)
+        if not caminho:
+            return {"ok": False, "provider": "focusnfe", "codigo": "FOCUS_BAD_REQUEST",
+                    "erro": f"doc_type sem espelho PDF: {doc_type!r}."}
         chave = str(chave or "").strip()
         if not chave:
-            return {
-                "ok":       False,
-                "provider": "focusnfe",
-                "codigo":   "FOCUS_BAD_REQUEST",
-                "erro":     "chave obrigatoria.",
-            }
+            return {"ok": False, "provider": "focusnfe", "codigo": "FOCUS_BAD_REQUEST",
+                    "erro": "chave obrigatoria."}
+        if not _re.match(r"^[A-Za-z0-9._-]{1,80}$", chave):
+            return {"ok": False, "provider": "focusnfe", "codigo": "FOCUS_BAD_REQUEST",
+                    "erro": "chave em formato invalido."}
         try:
             token = self._require_token()
         except RuntimeError as exc:
-            return {
-                "ok":       False,
-                "provider": "focusnfe",
-                "codigo":   "FOCUS_TOKEN_AUSENTE",
-                "erro":     str(exc),
-            }
-        base_url = self._base_url_for(ambiente)
-        url = f"{base_url}/v2/nfes_recebidas/{chave}.pdf"
-        headers_auth = {**_basic_auth_header(token), "Accept": "application/pdf"}
-        try:
-            resp = requests.get(url, headers=headers_auth, allow_redirects=False,
-                                timeout=self._timeout)
-        except requests.exceptions.RequestException as exc:
-            return {
-                "ok":       False,
-                "provider": "focusnfe",
-                "codigo":   "DANFE_REQUEST_ERROR",
-                "erro":     f"Erro HTTP: {type(exc).__name__}.",
-            }
+            return {"ok": False, "provider": "focusnfe", "codigo": "FOCUS_TOKEN_AUSENTE",
+                    "erro": str(exc)}
 
-        # 302 — segundo GET SEM Authorization
+        base_url = self._base_url_for(ambiente)
+        url = f"{base_url}/v2/{caminho}/{chave}.pdf"
+        try:
+            resp = requests.get(url, headers={**_basic_auth_header(token),
+                                              "Accept": self._PDF_ACCEPT},
+                                allow_redirects=False, timeout=self._timeout)
+        except requests.exceptions.Timeout:
+            return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_TIMEOUT",
+                    "erro": f"Timeout ({self._timeout}s) ao consultar FocusNFe."}
+        except requests.exceptions.RequestException as exc:
+            return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_REQUEST_ERROR",
+                    "erro": f"Erro HTTP: {type(exc).__name__}."}
+
+        body: bytes | None = None
+        mime: str = ""
         if resp.status_code in (301, 302, 303, 307, 308):
             location = resp.headers.get("Location", "").strip()
             if not location:
-                return {
-                    "ok":       False,
-                    "provider": "focusnfe",
-                    "codigo":   "DANFE_NO_LOCATION",
-                    "erro":     f"Redirect {resp.status_code} sem Location.",
-                }
+                return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_NO_LOCATION",
+                        "erro": f"Redirect {resp.status_code} sem Location."}
+            if not _redirect_pdf_seguro(location):
+                return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_HOST_PROIBIDO",
+                        "erro": "Redirect inseguro ou host fora da allowlist."}
             try:
-                # CRITICO: nao enviar Authorization no segundo GET (URL pre-assinada)
-                resp2 = requests.get(location, headers={"Accept": "application/pdf"},
+                # CRÍTICO: segundo GET nunca envia Authorization.
+                resp2 = requests.get(location, headers={"Accept": self._PDF_ACCEPT},
                                      allow_redirects=False, timeout=self._timeout)
+            except requests.exceptions.Timeout:
+                return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_TIMEOUT",
+                        "erro": f"Timeout ({self._timeout}s) no download pré-assinado."}
             except requests.exceptions.RequestException as exc:
-                return {
-                    "ok":       False,
-                    "provider": "focusnfe",
-                    "codigo":   "DANFE_DOWNLOAD_ERROR",
-                    "erro":     f"Erro no download pre-assinado: {type(exc).__name__}.",
-                }
+                return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_DOWNLOAD_ERROR",
+                        "erro": f"Erro no download pré-assinado: {type(exc).__name__}."}
             if resp2.status_code != 200:
-                return {
-                    "ok":          False,
-                    "provider":    "focusnfe",
-                    "codigo":      "DANFE_HTTP_ERROR",
-                    "erro":        f"Storage devolveu {resp2.status_code}.",
-                    "http_status": resp2.status_code,
-                }
+                return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_HTTP_ERROR",
+                        "erro": f"Storage devolveu {resp2.status_code}.",
+                        "http_status": resp2.status_code}
             body = resp2.content
-            mime = resp2.headers.get("Content-Type", "application/pdf").split(";")[0].strip()
+            mime = resp2.headers.get("Content-Type", "").split(";")[0].strip().lower()
         elif resp.status_code == 200:
             body = resp.content
-            mime = resp.headers.get("Content-Type", "application/pdf").split(";")[0].strip()
+            mime = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        elif resp.status_code == 401:
+            return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_NAO_AUTORIZADO",
+                    "erro": "Credencial rejeitada pela FocusNFe.", "http_status": 401}
+        elif resp.status_code == 404:
+            return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_NAO_ENCONTRADO",
+                    "erro": "Documento não encontrado na FocusNFe.", "http_status": 404}
         else:
-            return {
-                "ok":          False,
-                "provider":    "focusnfe",
-                "codigo":      "DANFE_UNEXPECTED_HTTP",
-                "erro":        f"Status HTTP inesperado ({resp.status_code}).",
-                "http_status": resp.status_code,
-            }
+            return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_UNEXPECTED_HTTP",
+                    "erro": f"Status HTTP inesperado ({resp.status_code}).",
+                    "http_status": resp.status_code}
 
-        sha256 = hashlib.sha256(body).hexdigest()
-        return {
-            "ok":       True,
-            "provider": "focusnfe",
-            "bytes":    body,
-            "sha256":   sha256,
-            "mime":     mime,
-            "tamanho":  len(body),
-        }
+        if not body:
+            return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_VAZIO",
+                    "erro": "Corpo vazio."}
+        if len(body) > self._PDF_MAX_BYTES:
+            return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_MUITO_GRANDE",
+                    "erro": f"Corpo excede {self._PDF_MAX_BYTES} bytes.", "tamanho": len(body)}
+        if mime and mime != self._PDF_ACCEPT:
+            return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_MIME_INESPERADO",
+                    "erro": f"Content-Type inesperado: {mime}.", "mime": mime}
+        if not body.startswith(b"%PDF-"):
+            # Prova de conteúdo: MIME é declaração, bytes mágicos são fato.
+            return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_CONTEUDO_INVALIDO",
+                    "erro": "Conteúdo devolvido não é PDF."}
+        return {"ok": True, "provider": "focusnfe", "bytes": body,
+                "sha256": hashlib.sha256(body).hexdigest(),
+                "mime": self._PDF_ACCEPT, "tamanho": len(body)}
+
+    def baixar_danfe(self, chave: str, ambiente: str | None = None) -> dict:
+        """DANFE (PDF) da NF-e recebida. Ver `_baixar_pdf_por_chave`."""
+        return self._baixar_pdf_por_chave("nfe", chave, ambiente, "DANFE")
+
+    def baixar_dacte(self, chave: str, ambiente: str | None = None) -> dict:
+        """DACTE (PDF) do CT-e recebido — gate ESPELHO-GRAFICO (2026-09-10).
+
+        Só existe para CT-e **recebido** contra o CNPJ. CT-e de receita
+        (emitido pelo proprio tenant) nao esta em `ctes_recebidas` — decisao
+        de Marcos: nao precisa de DACTE por aqui.
+        """
+        return self._baixar_pdf_por_chave("cte", chave, ambiente, "DACTE")
 
     # ── DANFSe HTML (NFS-e recebida — FocusNFe) ────────────────────────
     _DANFSE_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB — defesa contra flood

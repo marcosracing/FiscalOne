@@ -1328,3 +1328,45 @@ situacao dirigindo cStat, XML por item, cancelada sem XML, pendencia
 segurando o cursor, MDF-e recusado, lote vazio. Suite completa: 560 verdes.
 
 Handoff: `docs/adr/_handoff/2026-09-10-cte-recebidas-focusnfe.md`.
+
+
+---
+
+## Espelho gráfico em PDF — DANFE e DACTE (2026-09-10)
+
+Gate `ESPELHO-GRAFICO`. Marcos: "precisamos colocar a Danfe no Gerenciador
+Fiscal, Dacte para o Cte e danfse para Nfse"; e **sem custódia** — "busca na
+Focus todas as vezes, será pouco uso".
+
+**Endpoints oficiais** (consultados em 2026-09-10):
+`GET /v2/nfes_recebidas/{chave}.pdf` (DANFE) e
+`GET /v2/ctes_recebidas/{chave}.pdf` (DACTE). Ambos respondem **302** para a
+URL pré-assinada do storage.
+
+**`_baixar_pdf_por_chave`** concentra o fluxo dos dois: regex na chave, GET com
+Basic Auth e `allow_redirects=False`, segundo GET **sem Authorization**,
+limite de 10 MiB, `Content-Type: application/pdf` obrigatório e prova por
+**bytes mágicos `%PDF-`** (MIME é declaração, bytes são fato). `baixar_danfe`
+foi reescrito sobre ele — existia desde julho sem rota e sem nenhuma dessas
+proteções — e `baixar_dacte` é novo.
+
+**Redirect do PDF tem regra própria** (`_redirect_pdf_seguro`): a allowlist do
+XML recusaria toda abertura, porque o storage da Focus é outro domínio. Aqui
+exige-se HTTPS, porta padrão, sem credencial embutida e sem fragmento; se a
+env `FISCALONE_XML_REDIRECT_HOSTS` tiver valor, o host também precisa constar
+nela. A defesa do conteúdo é o MIME + os bytes mágicos, e o PDF é apenas
+repassado ao navegador — nunca parseado nem persistido.
+
+**Rotas M2M**: `POST /fiscal/nfe/recebida/danfe` e
+`POST /fiscal/cte/recebida/dacte`, no mesmo contrato do DANFSe — bytes crus com
+`application/pdf`, headers `X-Trace-Id`, `X-RLogix-Provider`,
+`X-RLogix-Ambiente`, `X-RLogix-Content-SHA256`, `Cache-Control: private,
+no-store`; erro em envelope JSON tipado, com `http_status_upstream` quando
+houver.
+
+**Mudanças de contrato** (testes antigos atualizados): timeout do DANFE passou
+a ter código próprio (`DANFE_TIMEOUT`, antes caía em `DANFE_REQUEST_ERROR`) e
+o conteúdo precisa começar com `%PDF-`.
+
+**Testes**: `tests/test_espelho_grafico_pdf.py` (17). Suíte completa: 577.
+Handoff: `docs/adr/_handoff/2026-09-10-espelho-grafico-pdf.md`.

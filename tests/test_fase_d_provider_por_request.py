@@ -356,7 +356,9 @@ class TestBaixarDanfeTokenInjetado:
         resp2 = MagicMock(spec=requests.Response)
         resp2.status_code = 200
         resp2.headers = {"Content-Type": "application/pdf"}
-        resp2.content = b"%PDF"
+        # Bytes mágicos reais: `%PDF-` (gate ESPELHO-GRAFICO valida o conteúdo,
+        # não só o Content-Type declarado).
+        resp2.content = b"%PDF-1.4\n"
         mock_get.side_effect = [resp1, resp2]
         r = p.baixar_danfe("A" * 44)
         assert r["ok"] is True
