@@ -368,9 +368,11 @@ class TestGovFetchSucesso:
 
 # ── gov_fetch — validacoes ──────────────────────────────────────────────────
 class TestGovFetchValidacoes:
-    def test_tipo_nao_nfe_falha(self, provider_com_token):
+    def test_tipo_fora_do_contrato_falha(self, provider_com_token):
+        """Suportados: nfe, nfse e cte (desde 2026-09-10). MDF-e não é
+        documento recebido contra o CNPJ."""
         r = provider_com_token.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "cte"}, "fo-t")
+            {"cnpj": "07219398000109", "tipo": "mdfe"}, "fo-t")
         assert r["ok"] is False
         assert r["codigo"] == "FOCUS_TIPO_NAO_SUPORTADO"
 

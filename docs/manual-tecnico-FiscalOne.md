@@ -770,6 +770,19 @@ no CtrlOne.
   - Ate 100 registros por resposta;
   - Headers de paginacao: `X-Total-Count`, `X-Max-Version`;
   - XML individual: `GET /v2/nfes_recebidas/{chave}.xml`.
+- **CT-e recebidas** (gate CTE-RECEBIDOS, 2026-09-10) —
+  `GET /v2/ctes_recebidas?cnpj=<>&versao=<>`
+  - Ate 100 registros por resposta; mesmos headers de paginacao;
+  - **Nao aceita `completa`** (isso e' so da NFS-e);
+  - Item: `nome_emitente, documento_emitente, cnpj_destinatario,
+    chave_cte, valor_total, data_emissao, situacao, tipo_cte, versao,
+    digest_value, carta_correcao, data_carta_correcao,
+    data_cancelamento, justificativa_cancelamento`;
+  - A listagem **nao traz XML**: cada item autorizado tem o XML baixado
+    de `GET /v2/ctes_recebidas/{chave}.xml` dentro do lote, sujeito ao
+    `FOCUSNFE_XML_BATCH_CAP` e ao cursor seguro;
+  - **MDF-e nao existe como documento recebido** — quem o emite e' a
+    propria transportadora; a Focus nao tem endpoint equivalente.
 - **NFSe Nacional recebidas** —
   `GET /v2/nfsens_recebidas?cnpj=<>&versao=<>&completa=1`
   - Ate 100 registros por resposta;
@@ -1276,3 +1289,42 @@ script MapOne já validado:
 
 Rollback: restaurar o backup validado da rodada e reiniciar apenas
 `fiscalone.service`.
+
+
+---
+
+## Lote de CT-e recebidas — FocusNFe (2026-09-10)
+
+Gate `CTE-RECEBIDOS`. Pedido de Marcos: "importar CT-e recebidos para o
+Gerenciador Fiscal ficar ok". Ate aqui o `gov_fetch` recusava `tipo='cte'`
+com `FOCUS_TIPO_NAO_SUPORTADO`, e so existia recuperacao individual por
+chave — a empresa tinha DF-e de CT-e habilitado na Focus e nenhum coletor.
+
+**O que mudou em `providers/focusnfe_provider.py`:**
+
+- `gov_fetch` aceita `tipo='cte'` e usa `GET /v2/ctes_recebidas`
+  (contrato oficial consultado em 2026-09-10). MDF-e segue recusado.
+- Mapper novo `_mapear_cte_focus`: transcreve os campos oficiais do item,
+  emite `chCTe` **e** o alias generico `chave` (o normalizador do MapOne
+  resolve os dois), e deriva `cStat` de `situacao`
+  (autorizada 100 / cancelada 101 / denegada 110). Numero e serie **nao**
+  vem na listagem: o consumidor os deriva da chave de 44 posicoes, cujo
+  layout e' o mesmo da NF-e.
+- Loop de XML: NF-e continua condicionado a `nfe_completa`; CT-e nao tem
+  flag equivalente, entao todo item autorizado tenta baixar o XML. Item
+  cancelado nao baixa. `baixar_xml_completo` ganhou `doc_type` (default
+  `"nfe"`, chamadores antigos intactos).
+- Cursor seguro, `X-Total-Count`/`X-Max-Version` e o cap de XML valem
+  igual — CT-e nao tem contrato proprio de paginacao.
+
+**Consumidor.** `POST /fiscal/gov/fetch` ja aceitava `tipo='cte'` e o
+`scripts/dfe_sync` do MapOne ja tinha `cte` na allowlist: o unico bloqueio
+era o provider. No MapOne, `logione/services/dfe_normalizador` passou a
+reconhecer `chCTe`/`chave_cte` como alias de chave.
+
+**Testes:** `tests/test_focusnfe_cte_recebidas.py` (12): endpoint e
+parametros exatos, host por ambiente, mapeamento dos campos oficiais,
+situacao dirigindo cStat, XML por item, cancelada sem XML, pendencia
+segurando o cursor, MDF-e recusado, lote vazio. Suite completa: 560 verdes.
+
+Handoff: `docs/adr/_handoff/2026-09-10-cte-recebidas-focusnfe.md`.

@@ -177,9 +177,12 @@ class TestGovFetchTipoNfse:
         assert args[0].endswith("/v2/nfes_recebidas")
         assert "completa" not in kwargs["params"]
 
-    def test_tipo_cte_continua_bloqueado(self, provider_com_token):
+    def test_mdfe_continua_bloqueado(self, provider_com_token):
+        """CT-e passou a ser suportado em 2026-09-10 (gate CTE-RECEBIDOS);
+        MDF-e não — não é documento recebido contra o CNPJ e a Focus não
+        tem endpoint para ele. Lote de CT-e: `test_focusnfe_cte_recebidas`."""
         r = provider_com_token.gov_fetch(
-            {"cnpj": "07219398000109", "tipo": "cte"}, "fo-e4c")
+            {"cnpj": "07219398000109", "tipo": "mdfe"}, "fo-e4c")
         assert r["ok"] is False
         assert r["codigo"] == "FOCUS_TIPO_NAO_SUPORTADO"
 

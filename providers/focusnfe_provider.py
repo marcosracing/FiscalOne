@@ -364,6 +364,87 @@ def _mapear_nfe_focus(item: dict, trace_id: str) -> dict:
     return doc
 
 
+def _mapear_cte_focus(item: dict, trace_id: str) -> dict:
+    """Mapeia item Focus (`GET /v2/ctes_recebidas`) para o dict canonico do lote.
+
+    Contrato oficial FocusNFe (consultado em 2026-09-10,
+    `doc.focusnfe.com.br/reference/consultar_ctes_recebidas`). Campos do item:
+    `nome_emitente, documento_emitente, cnpj_destinatario, chave_cte,
+    valor_total, data_emissao, situacao, tipo_cte, versao, digest_value,
+    carta_correcao, data_carta_correcao, data_cancelamento,
+    justificativa_cancelamento`. A listagem NAO traz XML — ele vem do
+    endpoint por chave (`/v2/ctes_recebidas/{chave}.xml`), baixado no lote.
+
+    `situacao` dirige cStat como no mapper NF-e:
+      autorizada -> 100 | cancelada -> 101 | denegada -> 110.
+
+    Emite `chave` (alias generico) alem de `chCTe`: o normalizador do MapOne
+    resolve os dois. Nunca inclui Authorization/token; `raw_json_focus` vai
+    sanitizado.
+    """
+    if not isinstance(item, dict):
+        raise ValueError(f"item nao e dict: {type(item).__name__}")
+
+    chave = _get_str(item, "chave_cte", "chave", "chCTe")
+    if not chave:
+        raise ValueError("chave CT-e ausente no item Focus")
+
+    situacao = _get_str(item, "situacao").strip().lower()
+    tipo_cte = _get_str(item, "tipo_cte")
+
+    versao_raw = item.get("versao") or 0
+    try:
+        versao = int(versao_raw)
+    except (TypeError, ValueError):
+        versao = 0
+
+    v_cte = _get_str(item, "valor_total", "vCTe", "valor_cte")
+
+    if situacao == "cancelada":
+        cStat_r, xMotivo_r, cancelado_r = "101", "Cancelamento homologado", 1
+    elif situacao == "denegada":
+        cStat_r, xMotivo_r, cancelado_r = "110", "Uso denegado", 0
+    else:
+        cStat_r, xMotivo_r, cancelado_r = "100", "Resumo FocusNFe", 0
+
+    doc = {
+        "chCTe":          chave,
+        # Alias generico: o normalizador do consumidor procura `chave` primeiro.
+        "chave":          chave,
+        "CNPJ_emit":      _get_str(item, "documento_emitente", "cnpj_emitente"),
+        "CNPJ_dest":      _get_str(item, "cnpj_destinatario"),
+        "emit_nome":      _get_str(item, "nome_emitente", "razao_social_emitente"),
+        "vCTe":           v_cte,
+        "valor_total":    v_cte,
+        "dh_emi":         _get_str(item, "data_emissao"),
+        "cStat":          cStat_r,
+        "xMotivo":        xMotivo_r,
+        # RESUMO por default — o lote decide se vira COMPLETO ao baixar o XML.
+        "status_xml":     "RESUMO",
+        "import_origin":  "fiscalone_focusnfe",
+        "trace_id":       trace_id,
+        "parser_version": "focus_v2",
+        "versao":         versao,
+        "raw_json_focus": _dump_focus_json(item),
+        "situacao_focus": situacao,
+        "cancelado":      cancelado_r,
+        "tipo_cte":       tipo_cte,
+        "digest_value":   _get_str(item, "digest_value"),
+    }
+    # Numero e serie NAO vem na listagem de CT-e recebidas; o consumidor
+    # deriva os dois da chave de 44 posicoes (mesmo layout da NF-e).
+    for origem, destino in (
+        ("data_cancelamento", "data_cancelamento"),
+        ("justificativa_cancelamento", "justificativa_cancelamento"),
+        ("carta_correcao", "carta_correcao"),
+        ("data_carta_correcao", "data_carta_correcao"),
+    ):
+        valor = _get_str(item, origem)
+        if valor:
+            doc[destino] = valor
+    return doc
+
+
 # ── Normalizadores NFSe (fix 2026-07-18 — servicos lista/dict) ────────────────
 # Schema oficial FocusNFe admite `servicos` como dict OU lista de objetos. O
 # mapper original tratava apenas dict e descartava silenciosamente listas,
@@ -847,11 +928,11 @@ class FocusNFeProvider(GovProvider):
 
     # ── gov_fetch — HTTP real ──────────────────────────────────────────────
     def gov_fetch(self, payload: dict, trace_id: str) -> dict:
-        """Consulta lote incremental de NF-e recebidas via FocusNFe.
+        """Consulta lote incremental de documentos recebidos via FocusNFe.
 
         payload:
           - cnpj (str, 14 digitos) — obrigatorio
-          - tipo (str) — deve ser 'nfe' nesta fase
+          - tipo (str) — 'nfe' | 'nfse' | 'cte' (CT-e desde 2026-09-10)
           - ambiente (str) — 'producao' | 'homologacao' (default homologacao)
           - ultimo_nsu (str|int) — cursor 'versao' (Focus). Default '0'.
 
@@ -869,13 +950,15 @@ class FocusNFeProvider(GovProvider):
         versao_entrada = str(ultimo_nsu_entrada).strip() or "0"
 
         # ── Validacoes ────────────────────────────────────────────────────
-        if tipo not in ("nfe", "nfse"):
-            # Fase E4c — FocusNFe suporta nfe (NF-e recebida) e nfse
-            # (NFSe Nacional recebida). CT-e e MDF-e continuam nao
-            # suportados pelo FocusNFe (delegar a SEFAZ/outros providers).
+        if tipo not in ("nfe", "nfse", "cte"):
+            # Fase E4c + CTE-RECEBIDOS (2026-09-10): FocusNFe suporta nfe
+            # (NF-e recebida), nfse (NFSe Nacional recebida) e cte (CT-e
+            # recebido). MDF-e nao e documento recebido contra o CNPJ —
+            # e emitido pela propria transportadora — e a Focus nao tem
+            # endpoint de MDF-e recebido.
             return _envelope_erro(
                 trace_id, "FOCUS_TIPO_NAO_SUPORTADO",
-                "FocusNFe suporta apenas tipo='nfe' ou 'nfse'.",
+                "FocusNFe suporta apenas tipo='nfe', 'nfse' ou 'cte'.",
                 {"ultimo_nsu": versao_entrada, "max_nsu": versao_entrada},
             )
         if not cnpj:
@@ -898,6 +981,11 @@ class FocusNFeProvider(GovProvider):
         # eh comum aos dois — nao ha divergencia de contrato.
         if tipo == "nfse":
             url = f"{base_url}/v2/nfsens_recebidas"
+        elif tipo == "cte":
+            # Contrato oficial (2026-09-10): GET /v2/ctes_recebidas?cnpj=&versao=
+            # Mesmos headers de paginacao (X-Total-Count, X-Max-Version) e
+            # limite de 100 registros. Nao aceita `completa`.
+            url = f"{base_url}/v2/ctes_recebidas"
         else:
             url = f"{base_url}/v2/nfes_recebidas"
         headers = {
@@ -1054,7 +1142,8 @@ class FocusNFeProvider(GovProvider):
         # Erro de mapper NAO derruba batch; preserva `versao`/`chave` extraidas
         # pre-mapper para permitir que o consumidor bloqueie o cursor antes do
         # gap. Sem `versao`, o consumidor deve tratar como pendencia da pagina.
-        mapper = _mapear_nfse_focus if tipo == "nfse" else _mapear_nfe_focus
+        mapper = {"nfse": _mapear_nfse_focus,
+                  "cte": _mapear_cte_focus}.get(tipo, _mapear_nfe_focus)
         documentos: list[dict] = []
         erros: list[dict] = []
         max_versao_itens = 0
@@ -1077,6 +1166,7 @@ class FocusNFeProvider(GovProvider):
                 )
                 chave_pre = _get_str(
                     item, "chave_nfe", "chave", "chNFe", "chave_nfse",
+                    "chave_cte", "chCTe",
                 ) or None
 
             # Bail-out pre-mapper (rev.3): quando a versao bruta e'
@@ -1186,14 +1276,20 @@ class FocusNFeProvider(GovProvider):
             for doc in documentos:
                 if doc.get("cancelado") == 1:
                     continue
-                # NF-e (fluxo E4a existente)
-                if not doc.get("nfe_completa"):
+                # NF-e (fluxo E4a): so quando a Focus marca `nfe_completa`.
+                # CT-e (2026-09-10): a listagem `/v2/ctes_recebidas` nao tem
+                # flag equivalente — todo item autorizado tem XML no endpoint
+                # por chave, entao o lote tenta baixar sempre.
+                if tipo == "nfe" and not doc.get("nfe_completa"):
+                    continue
+                chave_doc = doc.get("chCTe") if tipo == "cte" else doc.get("chNFe")
+                if not chave_doc:
                     continue
                 if xml_baixados >= _XML_BATCH_CAP:
                     doc["xml_pending"] = True
                     xml_pendentes += 1
                     continue
-                res = self.baixar_xml_completo(doc["chNFe"], ambiente)
+                res = self.baixar_xml_completo(chave_doc, ambiente, doc_type=tipo)
                 if res.get("ok"):
                     doc["xml_bruto"]       = res["xml_bruto"]
                     doc["xml_hash_sha256"] = res["xml_hash_sha256"]
@@ -1921,10 +2017,13 @@ class FocusNFeProvider(GovProvider):
         return self._http_get_xml_bytes_upstream(url, permitir_redirect=False)
 
     # ── baixar_xml_completo — NF-e por chave (Fase E4a, G0.2a refactor) ──
-    def baixar_xml_completo(self, chave: str, ambiente: str | None = None) -> dict:
-        """Baixa XML nfeProc da FocusNFe pelo endpoint separado.
+    def baixar_xml_completo(self, chave: str, ambiente: str | None = None,
+                            doc_type: str = "nfe") -> dict:
+        """Baixa o XML do documento recebido pelo endpoint por chave.
 
-        Endpoint: GET {base_url}/v2/nfes_recebidas/{chave}.xml
+        Endpoint: GET {base_url}/v2/{nfes|ctes}_recebidas/{chave}.xml
+        `doc_type` default `"nfe"` preserva os chamadores existentes; o lote
+        de CT-e (2026-09-10) passa `doc_type="cte"`.
         Refatorado em G0.2a: delega ao helper interno; contrato do lote
         preservado — `xml_bruto` (str) mantido para consumidores existentes.
 
@@ -1939,7 +2038,7 @@ class FocusNFeProvider(GovProvider):
                 "codigo":   "FOCUS_BAD_REQUEST",
                 "erro":     "chave obrigatoria.",
             }
-        res = self.baixar_xml_bytes_por_chave("nfe", chave, ambiente)
+        res = self.baixar_xml_bytes_por_chave(doc_type, chave, ambiente)
         if not res.get("ok"):
             return res
         # Wrapper legado: expoe xml_bruto (str) para gov_fetch e testes E4a.
