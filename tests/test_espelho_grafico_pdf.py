@@ -174,3 +174,54 @@ class TestRotas:
         assert self._post("/fiscal/nfe/recebida/danfe", provider="sefaz").status_code == 400
         assert self._post("/fiscal/nfe/recebida/danfe", ambiente="sandbox").status_code == 400
         assert self._post("/fiscal/nfe/recebida/danfe", focusnfe_token="").status_code == 400
+
+
+class TestMensagemDoUpstream:
+    """Marcos (10/09) viu `DANFE_NAO_AUTORIZADO` sem saber a causa: o 401 da
+    FocusNFe podia ser credencial inválida **ou** permissão negada para o
+    recurso, e o nosso código descartava a mensagem que separa as duas."""
+
+    def _resp_json(self, status, corpo):
+        r = MagicMock(spec=requests.Response)
+        r.status_code = status
+        r.headers = {"Content-Type": "application/json"}
+        r.content = b"{}"
+        r.json.return_value = corpo
+        return r
+
+    def test_401_carrega_codigo_e_mensagem_da_focus(self, provider):
+        resp = self._resp_json(401, {"codigo": "permissao_negada",
+                                     "mensagem": "Token sem acesso ao recurso"})
+        with patch.object(requests, "get", return_value=resp):
+            r = provider.baixar_danfe(CHAVE_NFE)
+        assert r["codigo"] == "DANFE_NAO_AUTORIZADO"
+        assert "permissao_negada" in r["erro"]
+        assert "Token sem acesso ao recurso" in r["erro"]
+
+    def test_403_cai_no_mesmo_tratamento(self, provider):
+        resp = self._resp_json(403, {"codigo": "acesso_negado", "mensagem": "x"})
+        with patch.object(requests, "get", return_value=resp):
+            r = provider.baixar_dacte(CHAVE_CTE)
+        assert r["codigo"] == "DACTE_NAO_AUTORIZADO"
+        assert r["http_status"] == 403
+
+    def test_corpo_nao_json_mantem_a_mensagem_padrao(self, provider):
+        r0 = MagicMock(spec=requests.Response)
+        r0.status_code = 401
+        r0.headers = {"Content-Type": "text/html"}
+        r0.content = b"<html>"
+        r0.json.side_effect = ValueError("nao e json")
+        with patch.object(requests, "get", return_value=r0):
+            r = provider.baixar_danfe(CHAVE_NFE)
+        assert r["erro"] == "Credencial rejeitada pela FocusNFe."
+
+    def test_nada_alem_de_codigo_e_mensagem_atravessa(self, provider):
+        """O corpo de erro não pode virar um vazamento: só dois campos."""
+        resp = self._resp_json(404, {"codigo": "nao_encontrado",
+                                     "mensagem": "Documento fiscal nao encontrado",
+                                     "chave": CHAVE_NFE,
+                                     "cnpj": "07219398000109"})
+        with patch.object(requests, "get", return_value=resp):
+            r = provider.baixar_danfe(CHAVE_NFE)
+        assert CHAVE_NFE not in r["erro"]
+        assert "07219398000109" not in r["erro"]

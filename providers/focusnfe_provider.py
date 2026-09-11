@@ -58,6 +58,26 @@ def _basic_auth_header(token: str) -> dict:
     return {"Authorization": f"Basic {credencial}"}
 
 
+def _mensagem_do_erro_focus(resp, padrao: str) -> str:
+    """`codigo: mensagem` do corpo de erro da FocusNFe, quando houver.
+
+    Só esses dois campos entram — o corpo cru poderia carregar dado do
+    documento, e o token nunca aparece em resposta de erro dela.
+    """
+    try:
+        corpo = resp.json()
+    except Exception:  # noqa: BLE001 — corpo não-JSON é caso normal
+        return padrao
+    if not isinstance(corpo, dict):
+        return padrao
+    codigo = str(corpo.get("codigo") or "").strip()
+    mensagem = str(corpo.get("mensagem") or corpo.get("erro") or "").strip()
+    if not codigo and not mensagem:
+        return padrao
+    detalhe = " · ".join(p for p in (codigo, mensagem) if p)
+    return f"{padrao} FocusNFe: {detalhe[:300]}"
+
+
 def _parse_retry_after_int(raw: object) -> int | None:
     """Normaliza header Retry-After somente quando for inteiro positivo.
 
@@ -1561,12 +1581,22 @@ class FocusNFeProvider(GovProvider):
         elif resp.status_code == 200:
             body = resp.content
             mime = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
-        elif resp.status_code == 401:
-            return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_NAO_AUTORIZADO",
-                    "erro": "Credencial rejeitada pela FocusNFe.", "http_status": 401}
+        elif resp.status_code in (401, 403):
+            # Marcos: "Erro com detalhe facilita o Suporte". A FocusNFe
+            # devolve `codigo`/`mensagem` no corpo e a distinção importa:
+            # credencial inválida e permissão negada para o recurso chegam
+            # ambas como 401, e só a mensagem separa uma da outra. Copiamos
+            # **apenas** esses dois campos — nada de corpo cru, nunca o token.
+            return {"ok": False, "provider": "focusnfe",
+                    "codigo": f"{prefixo_erro}_NAO_AUTORIZADO",
+                    "erro": _mensagem_do_erro_focus(
+                        resp, "Credencial rejeitada pela FocusNFe."),
+                    "http_status": resp.status_code}
         elif resp.status_code == 404:
             return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_NAO_ENCONTRADO",
-                    "erro": "Documento não encontrado na FocusNFe.", "http_status": 404}
+                    "erro": _mensagem_do_erro_focus(
+                        resp, "Documento não encontrado na FocusNFe."),
+                    "http_status": 404}
         else:
             return {"ok": False, "provider": "focusnfe", "codigo": f"{prefixo_erro}_UNEXPECTED_HTTP",
                     "erro": f"Status HTTP inesperado ({resp.status_code}).",
