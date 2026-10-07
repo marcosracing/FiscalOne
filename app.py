@@ -7,7 +7,9 @@ Capacidade atual:
     e NFS-e PDF Prefeitura de São Paulo (POST /fiscal/documents/import).
   - NÃO assina, NÃO transmite, NÃO consulta SEFAZ — providers são stubs.
   - Busca ativa SEFAZ/DFe: stub (Fase 2 pendente).
-  - Emissão de CT-e, MDF-e, cancelamento, eventos fiscais: honest-stub, 501.
+  - Emissão/consulta/cancelamento de CT-e e NFS-e Nacional via FocusNFe
+    (C2): SOMENTE homologação, com ambiente='homologacao' explícito no
+    corpo (ADR-0054 §10). MDF-e, NF-e, demais eventos: honest-stub, 501.
   - Produção fiscal: bloqueada por padrão via flags duplas.
   - Sem banco, sem XML raw, sem cooldown, sem certificado em repouso.
   - Toda persistência é responsabilidade da vertical (MapOne, CtrlOne).
@@ -393,6 +395,8 @@ def health():
         ),
         "emissao_ativa":       False,
         "emissao_bloqueada_por_design": True,
+        "emissao_homologacao": True,
+        "emissao_producao":    False,
         "persistencia_propria": False,
         "capacidade": {
             "parse_xml_zip":       True,
@@ -822,6 +826,110 @@ def _m2m_check(req):
     if not got or not hmac.compare_digest(got, expected):
         return False, "M2M_NAO_AUTORIZADO", 401
     return True, None, 200
+
+
+# ── C2 — CT-e e NFS-e Nacional SOMENTE em homologacao (EM-04/EM-05/EM-06) ────
+# ADR-0054 §10. FocusNFe monta/assina/transmite a partir do JSON; FiscalOne
+# nunca assina nem guarda certificado. `ambiente` vem do CORPO da requisicao
+# (nunca de FISCALONE_AMBIENTE/flags de producao do servidor) — e' a unica
+# fonte que decide se a chamada e' aceita, e e' verificado ANTES do M2M para
+# preservar o bloqueio total legado (EMISSAO_BLOQUEADA) de quem nao manda
+# ambiente='homologacao' explicito, igual as rotas de NF-e/MDF-e.
+_C2_REF_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _c2_ref_valido(ref) -> bool:
+    return isinstance(ref, str) and bool(_C2_REF_RE.match(ref))
+
+
+def _c2_erro(trace_id, codigo, mensagem, status_http):
+    return jsonify({"ok": False, "trace_id": trace_id, "codigo": codigo,
+                    "erro": mensagem}), status_http
+
+
+def _c2_rota(tipo: str, acao: str, ref_url: str | None = None):
+    """Corpo comum das rotas C2: emite, consulta ou cancela CT-e/NFS-e
+    Nacional, SOMENTE em homologacao (ADR-0054 §10; EM-04/EM-05/EM-06).
+
+    Ordem das recusas, sempre antes de qualquer HTTP a Focus:
+      1. corpo JSON (objeto obrigatorio);
+      2. ambiente (do corpo) != 'homologacao' -> 403 EMISSAO_BLOQUEADA;
+      3. M2M (`X-RLogix-Service-Token`);
+      4. ref (regex, do corpo na emissao / da URL na consulta/cancelamento);
+      5. focusnfe_token (string nao vazia, SO no corpo — sem fallback a
+         FOCUSNFE_TOKEN/env);
+      6. payload (objeto obrigatorio, so na emissao).
+    """
+    trace_id      = _trace(request)
+    source_system = request.headers.get("X-Source-System", "desconhecido")
+    operacao      = f"c2_{acao}_{tipo}"
+
+    payload_in = request.get_json(silent=True)
+    if not isinstance(payload_in, dict):
+        return _c2_erro(trace_id, "PAYLOAD_INVALIDO",
+                        "Payload JSON (objeto) obrigatorio.", 400)
+    corpo = payload_in
+
+    ambiente = corpo.get("ambiente")
+    if ambiente != "homologacao":
+        _log_stdout(operacao, "bloqueado_ambiente", trace_id,
+                    source_system=source_system,
+                    erro_msg="ambiente_diferente_de_homologacao")
+        return jsonify({
+            "ok": False, "trace_id": trace_id, "codigo": "EMISSAO_BLOQUEADA",
+            "erro": ("Emissao/consulta/cancelamento C2 disponivel apenas "
+                     "com ambiente='homologacao' explicito no corpo."),
+        }), 403
+
+    ok_m2m, m2m_codigo, m2m_status = _m2m_check(request)
+    if not ok_m2m:
+        _log_stdout(operacao, "erro", trace_id, source_system=source_system,
+                    erro_msg=m2m_codigo)
+        return jsonify({
+            "ok": False, "trace_id": trace_id, "codigo": m2m_codigo,
+            "erro": ("Servidor sem M2M configurado."
+                     if m2m_codigo == "M2M_NAO_CONFIGURADO"
+                     else "Token M2M ausente ou invalido."),
+        }), m2m_status
+
+    ref = ref_url if ref_url is not None else corpo.get("ref")
+    if not _c2_ref_valido(ref):
+        return _c2_erro(trace_id, "REF_INVALIDO",
+                        "ref deve casar com ^[A-Za-z0-9_-]{1,64}$.", 400)
+
+    focusnfe_token = corpo.pop("focusnfe_token", None)
+    try:
+        if not isinstance(focusnfe_token, str) or not focusnfe_token.strip():
+            return _c2_erro(trace_id, "FOCUS_TOKEN_AUSENTE",
+                            "focusnfe_token obrigatorio no corpo.", 400)
+        token = focusnfe_token.strip()
+
+        payload_focus = None
+        justificativa = None
+        if acao == "emitir":
+            payload_focus = corpo.get("payload")
+            if not isinstance(payload_focus, dict):
+                return _c2_erro(trace_id, "PAYLOAD_INVALIDO",
+                                "payload (objeto) obrigatorio na emissao.", 400)
+        elif acao == "cancelar":
+            just_in = corpo.get("justificativa")
+            justificativa = just_in if isinstance(just_in, str) and just_in.strip() else None
+
+        from providers.focusnfe_provider import FocusNFeProvider
+        provider = FocusNFeProvider(token=token)
+        if acao == "emitir":
+            resp = provider.c2_emitir(tipo, ref, payload_focus, token, trace_id)
+        elif acao == "consultar":
+            resp = provider.c2_consultar(tipo, ref, token, trace_id)
+        else:
+            resp = provider.c2_cancelar(tipo, ref, token, justificativa, trace_id)
+    finally:
+        del focusnfe_token
+
+    _log_stdout(operacao, "ok" if resp.get("ok") else "erro", trace_id,
+                source_system=source_system,
+                erro_msg=None if resp.get("ok") else f"status={resp.get('status')}")
+    return jsonify(resp), 200
 
 
 def _dv_chave_dfe(digitos_43: str) -> str:
@@ -1566,11 +1674,36 @@ def detalhe_cte(chave):
 # Independem das flags de producao. FiscalOne nesta fase e apenas gateway
 # para consulta/recepcao DFe. Assinatura, emissao, cancelamento, inutilizacao,
 # CC-e, encerramento MDF-e e condutor MDF-e ficam bloqueados por design.
+#
+# Excecao controlada (EM-04/EM-05/EM-06, ADR-0054 §10): CT-e e NFS-e
+# Nacional ganham emissao/consulta/cancelamento via C2 (`_c2_rota`), mas
+# SOMENTE quando o corpo declara `ambiente='homologacao'` explicitamente —
+# sem isso, a resposta e' IDENTICA ao bloqueio total legado (403
+# EMISSAO_BLOQUEADA). MDF-e e NF-e permanecem bloqueados sem excecao.
 
 @app.route("/fiscal/cte", methods=["POST"])
 def emitir_cte():
-    return bloquear_emissao("emitir_cte", _trace(request),
-                            request.headers.get("X-Source-System", "desconhecido"))
+    return _c2_rota("cte", "emitir")
+
+@app.route("/fiscal/cte/<ref>/consultar", methods=["POST"])
+def consultar_cte(ref):
+    return _c2_rota("cte", "consultar", ref_url=ref)
+
+@app.route("/fiscal/cte/<ref>", methods=["DELETE"])
+def cancelar_cte(ref):
+    return _c2_rota("cte", "cancelar", ref_url=ref)
+
+@app.route("/fiscal/nfsen", methods=["POST"])
+def emitir_nfsen():
+    return _c2_rota("nfsen", "emitir")
+
+@app.route("/fiscal/nfsen/<ref>/consultar", methods=["POST"])
+def consultar_nfsen(ref):
+    return _c2_rota("nfsen", "consultar", ref_url=ref)
+
+@app.route("/fiscal/nfsen/<ref>", methods=["DELETE"])
+def cancelar_nfsen(ref):
+    return _c2_rota("nfsen", "cancelar", ref_url=ref)
 
 @app.route("/fiscal/mdfe", methods=["POST"])
 def emitir_mdfe():
@@ -1585,11 +1718,6 @@ def encerrar_mdfe(chave):
 @app.route("/fiscal/mdfe/<chave>/condutor", methods=["POST"])
 def incluir_condutor_mdfe(chave):
     return bloquear_emissao("incluir_condutor_mdfe", _trace(request),
-                            request.headers.get("X-Source-System", "desconhecido"))
-
-@app.route("/fiscal/cte/<chave>", methods=["DELETE"])
-def cancelar_cte(chave):
-    return bloquear_emissao("cancelar_cte", _trace(request),
                             request.headers.get("X-Source-System", "desconhecido"))
 
 # Rotas defensivas para emissoes futuras — sempre bloqueadas

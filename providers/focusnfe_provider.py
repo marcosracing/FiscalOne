@@ -952,6 +952,132 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
     return doc
 
 
+# ── C2 homologação — CT-e e NFS-e Nacional (EM-04/EM-05/EM-06) ────────────────
+# Emissao, consulta e cancelamento SOMENTE em homologacao. Host fixo — as
+# funcoes abaixo NUNCA leem FOCUSNFE_BASE_URL nem FOCUSNFE_AMBIENTE (EM-06):
+# producao e impossivel por desenho aqui, independente de env/override.
+# Token vem sempre do parametro explicito do chamador (app.py), nunca de
+# self._token/env — ver `app.py:_c2_rota`.
+_C2_XML_CAMPO = "caminho_xml_nota_fiscal"
+_C2_PDF_CAMPO = {"cte": "caminho_dacte", "nfsen": "url_danfse"}
+_C2_STATUS_ERRO_POR_ACAO = {
+    "emitir":     "erro_autorizacao",
+    "consultar":  "erro_autorizacao",
+    "cancelar":   "erro_cancelamento",
+}
+_C2_STATUS_VALIDOS = {"processando_autorizacao", "autorizado", "erro_autorizacao",
+                      "cancelado", "erro_cancelamento", "nao_encontrado"}
+
+
+def _c2_host_homologacao() -> str:
+    """Host fixo de homologacao do C2 — NUNCA le FOCUSNFE_BASE_URL nem
+    FOCUSNFE_AMBIENTE (EM-06)."""
+    return _FOCUSNFE_HOSTS["homologacao"]
+
+
+def _c2_ler_json(resp) -> dict:
+    try:
+        corpo = resp.json()
+    except (ValueError, TypeError):
+        return {}
+    return corpo if isinstance(corpo, dict) else {}
+
+
+def _c2_sanear_corpo(corpo, token: str):
+    """Remove o token e sua forma Basic (base64) de qualquer string do
+    corpo devolvido pela Focus — defesa contra a Focus ecoar Authorization
+    dentro de `mensagem`/`erro` em uma resposta de erro."""
+    if not token:
+        return corpo
+    b64 = base64.b64encode(f"{token}:".encode()).decode()
+
+    def _limpa(v):
+        if isinstance(v, str):
+            return v.replace(token, "***").replace(b64, "***")
+        if isinstance(v, dict):
+            return {k: _limpa(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [_limpa(x) for x in v]
+        return v
+    return _limpa(corpo)
+
+
+def _c2_url_arquivo_homologacao(valor) -> str | None:
+    """So aceita path relativo ou URL absoluta do host fixo de homologacao,
+    sempre https. Qualquer outro host/scheme devolve None — o download
+    simplesmente nao acontece (nenhuma chamada HTTP fora da homologacao)."""
+    if not isinstance(valor, str) or not valor.strip():
+        return None
+    v = valor.strip()
+    host = _c2_host_homologacao()
+    hostname_homolog = urllib.parse.urlsplit(host).hostname or ""
+    if v.startswith("/") and not v.startswith("//"):
+        return f"{host}{v}"
+    bruto = ("https:" + v) if v.startswith("//") else v
+    partes = urllib.parse.urlsplit(bruto)
+    if partes.scheme.lower() != "https":
+        return None
+    if (partes.hostname or "").lower() != hostname_homolog.lower():
+        return None
+    caminho = partes.path or "/"
+    if partes.query:
+        caminho = f"{caminho}?{partes.query}"
+    return f"{host}{caminho}"
+
+
+def _c2_mapear_resposta(http_status: int, corpo: dict, acao: str):
+    """Traduz (http_status, corpo) da Focus para (ok, status, erros) do C2.
+
+    `status` fica sempre em processando_autorizacao|autorizado|
+    erro_autorizacao|cancelado|erro_cancelamento|nao_encontrado.
+    """
+    status = corpo.get("status") if isinstance(corpo, dict) else None
+    if isinstance(status, str) and status in _C2_STATUS_VALIDOS:
+        erros = corpo.get("erros")
+        erros = erros if isinstance(erros, list) else None
+        ok = status not in ("erro_autorizacao", "erro_cancelamento", "nao_encontrado")
+        return ok, status, erros
+    if isinstance(status, str) and status:
+        # Status fora do contrato C2 (6 valores): nunca repassado como
+        # sucesso nem como o valor literal que a Focus inventou.
+        erros = [{"codigo": "FOCUS_STATUS_DESCONHECIDO",
+                 "mensagem": f"FocusNFe retornou status fora do contrato C2: {status!r}."}]
+        return False, _C2_STATUS_ERRO_POR_ACAO.get(acao, "erro_autorizacao"), erros
+    if 200 <= http_status < 300:
+        if acao == "emitir":
+            return True, "processando_autorizacao", None
+        if acao == "cancelar":
+            return True, "cancelado", None
+        return True, "autorizado", None
+    codigo = corpo.get("codigo") if isinstance(corpo, dict) else None
+    mensagem = (corpo.get("mensagem") or corpo.get("erro")) if isinstance(corpo, dict) else None
+    erros = [{"codigo": str(codigo or f"FOCUS_HTTP_{http_status}"),
+              "mensagem": str(mensagem or f"FocusNFe respondeu HTTP {http_status}.")}]
+    if http_status == 404:
+        return False, "nao_encontrado", erros
+    return False, _C2_STATUS_ERRO_POR_ACAO.get(acao, "erro_autorizacao"), erros
+
+
+def _c2_envelope(ok: bool, status: str, http_status_focus: int, corpo: dict,
+                 trace_id, ref: str, tipo: str, erros=None) -> dict:
+    env = {"ok": ok, "trace_id": trace_id, "status": status, "ref": ref,
+          "http_status_focus": http_status_focus}
+    if isinstance(corpo, dict):
+        for campo in ("numero", "serie", "protocolo"):
+            valor = corpo.get(campo)
+            if valor not in (None, ""):
+                env[campo] = valor
+        chave = corpo.get("chave_cte") if tipo == "cte" else corpo.get("chave_acesso")
+        if chave:
+            env["chave"] = chave
+        mensagem = corpo.get("mensagem")
+        if mensagem:
+            env["mensagem"] = mensagem
+    if erros:
+        env["erros"] = erros
+    return env
+
+
 # ── Provider ──────────────────────────────────────────────────────────────────
 class FocusNFeProvider(GovProvider):
     def __init__(self, token: str | None = None):
@@ -2495,6 +2621,105 @@ class FocusNFeProvider(GovProvider):
             except NameError:
                 pass
 
+    # ── C2 homologacao — CT-e / NFS-e Nacional (EM-04/EM-05/EM-06) ─────────
+    def _c2_baixar_arquivo(self, valor, token: str) -> str | None:
+        """Baixa XML/PDF SOMENTE do host fixo de homologacao. Qualquer
+        outro host, scheme != https, ou status HTTP != 200 devolve None —
+        nunca propaga URL/host hostil ao chamador (nem tenta baixar lá)."""
+        url = _c2_url_arquivo_homologacao(valor)
+        if not url:
+            return None
+        headers = _basic_auth_header(token)
+        try:
+            resp = requests.get(url, headers=headers, timeout=self._timeout,
+                                allow_redirects=False)
+        except requests.exceptions.RequestException:
+            return None
+        finally:
+            del headers
+        if resp.status_code != 200 or not resp.content:
+            return None
+        return base64.b64encode(resp.content).decode()
+
+    def c2_emitir(self, tipo: str, ref: str, payload: dict, token: str,
+                  trace_id=None) -> dict:
+        """Emite CT-e/NFS-e Nacional SOMENTE em homologacao.
+
+        Endpoint: POST {homologacao}/v2/{tipo}?ref={ref}; corpo = `payload`
+        repassado identico (sem focusnfe_token/ambiente — quem monta o
+        corpo e' `app.py`). 202 e' o caminho normal (Focus e' assincrona).
+        """
+        url = f"{_c2_host_homologacao()}/v2/{tipo}"
+        headers = {**_basic_auth_header(token), "Content-Type": "application/json",
+                  "Accept": "application/json"}
+        try:
+            resp = requests.post(url, params={"ref": ref}, json=payload,
+                                 headers=headers, timeout=self._timeout,
+                                 allow_redirects=False)
+        except requests.exceptions.RequestException:
+            return _c2_envelope(
+                False, "erro_autorizacao", 0, {}, trace_id, ref, tipo,
+                erros=[{"codigo": "FOCUS_HTTP_ERROR",
+                       "mensagem": "Erro HTTP inesperado ao emitir."}])
+        finally:
+            del headers
+        corpo = _c2_sanear_corpo(_c2_ler_json(resp), token)
+        ok, status, erros = _c2_mapear_resposta(resp.status_code, corpo, "emitir")
+        return _c2_envelope(ok, status, resp.status_code, corpo, trace_id, ref, tipo, erros)
+
+    def c2_consultar(self, tipo: str, ref: str, token: str, trace_id=None) -> dict:
+        """Consulta CT-e/NFS-e Nacional SOMENTE em homologacao.
+
+        Endpoint: GET {homologacao}/v2/{tipo}/{ref}. Quando `autorizado`,
+        baixa XML/PDF do host fixo e devolve em base64; caminho fora da
+        homologacao/https nao e' baixado.
+        """
+        url = f"{_c2_host_homologacao()}/v2/{tipo}/{ref}"
+        headers = {**_basic_auth_header(token), "Accept": "application/json"}
+        try:
+            resp = requests.get(url, headers=headers, timeout=self._timeout,
+                                allow_redirects=False)
+        except requests.exceptions.RequestException:
+            return _c2_envelope(
+                False, "erro_autorizacao", 0, {}, trace_id, ref, tipo,
+                erros=[{"codigo": "FOCUS_HTTP_ERROR",
+                       "mensagem": "Erro HTTP inesperado ao consultar."}])
+        finally:
+            del headers
+        corpo = _c2_sanear_corpo(_c2_ler_json(resp), token)
+        ok, status, erros = _c2_mapear_resposta(resp.status_code, corpo, "consultar")
+        env = _c2_envelope(ok, status, resp.status_code, corpo, trace_id, ref, tipo, erros)
+        if status == "autorizado" and isinstance(corpo, dict):
+            xml_b64 = self._c2_baixar_arquivo(corpo.get(_C2_XML_CAMPO), token)
+            pdf_b64 = self._c2_baixar_arquivo(corpo.get(_C2_PDF_CAMPO.get(tipo, "")), token)
+            if xml_b64:
+                env["xml_base64"] = xml_b64
+            if pdf_b64:
+                env["pdf_base64"] = pdf_b64
+        return env
+
+    def c2_cancelar(self, tipo: str, ref: str, token: str,
+                    justificativa: str | None = None, trace_id=None) -> dict:
+        """Cancela CT-e/NFS-e Nacional SOMENTE em homologacao — sempre uma
+        unica chamada sincrona (DELETE {homologacao}/v2/{tipo}/{ref})."""
+        url = f"{_c2_host_homologacao()}/v2/{tipo}/{ref}"
+        headers = {**_basic_auth_header(token), "Content-Type": "application/json",
+                  "Accept": "application/json"}
+        corpo_delete = {"justificativa": justificativa} if justificativa else None
+        try:
+            resp = requests.delete(url, json=corpo_delete, headers=headers,
+                                   timeout=self._timeout, allow_redirects=False)
+        except requests.exceptions.RequestException:
+            return _c2_envelope(
+                False, "erro_cancelamento", 0, {}, trace_id, ref, tipo,
+                erros=[{"codigo": "FOCUS_HTTP_ERROR",
+                       "mensagem": "Erro HTTP inesperado ao cancelar."}])
+        finally:
+            del headers
+        corpo = _c2_sanear_corpo(_c2_ler_json(resp), token)
+        ok, status, erros = _c2_mapear_resposta(resp.status_code, corpo, "cancelar")
+        return _c2_envelope(ok, status, resp.status_code, corpo, trace_id, ref, tipo, erros)
+
     # ── Rotas legadas de consulta (stubs) ──────────────────────────────────
     def sync(self, cnpj):                                        return dict(_STUB)
     def listar_nfe(self, cnpj, pagina=1):                        return dict(_STUB)
@@ -2523,5 +2748,7 @@ class FocusNFeProvider(GovProvider):
 
 
 # Compatibilidade retro: alguns modulos importaram `FOCUSNFE_BASE_URL` como
-# atributo de modulo. Preservar sem quebrar semantica anterior.
-FOCUSNFE_BASE_URL = os.getenv("FOCUSNFE_BASE_URL", "https://api.focusnfe.com.br/v2")
+# atributo de modulo. Preservar sem quebrar semantica anterior — mas o
+# default SEM env explicito nunca pode ser producao (EM-06): cai para
+# homologacao, igual ao default de `_resolve_base_url`.
+FOCUSNFE_BASE_URL = os.getenv("FOCUSNFE_BASE_URL", _FOCUSNFE_HOSTS["homologacao"] + "/v2")
