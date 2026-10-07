@@ -1370,3 +1370,63 @@ o conteúdo precisa começar com `%PDF-`.
 
 **Testes**: `tests/test_espelho_grafico_pdf.py` (17). Suíte completa: 577.
 Handoff: `docs/adr/_handoff/2026-09-10-espelho-grafico-pdf.md`.
+
+## Emissão C2 — CT-e e NFS-e Nacional só em homologação (2026-10-07)
+
+Gate `EMISSOR-FISCAL-20261006`, filho F2 (commit `0f9edeb`). ADR-0054 §10,
+ratificado por Marcos em 06/10. O MapOne emite, o FiscalOne transporta, a
+FocusNFe autoriza e o CtrlOne numera. **Emissão em produção continua
+bloqueada:** o health segue com `emissao_producao: false`, e
+`bloquear_emissao` (`app.py:239`) vale para todo o resto. O C2 liga só
+`emissao_homologacao: true`.
+
+**Rotas M2M** (`app.py:1684-1706`, corpo comum em `_c2_rota`, `app.py:850`):
+
+| Método e rota | Ação |
+|---|---|
+| `POST /fiscal/cte` · `POST /fiscal/nfsen` | emitir (`payload` obrigatório) |
+| `POST /fiscal/<cte\|nfsen>/<ref>/consultar` | consultar |
+| `DELETE /fiscal/<cte\|nfsen>/<ref>` | cancelar (`justificativa` no corpo) |
+
+**Ordem das recusas**, todas antes de qualquer HTTP à Focus:
+
+1. corpo JSON que não é objeto → 400 `PAYLOAD_INVALIDO`;
+2. `ambiente` do corpo diferente de `"homologacao"` → **403
+   `EMISSAO_BLOQUEADA`**. Essa checagem vem antes do M2M: nem um chamador
+   autenticado chega à Focus fora de homologação;
+3. M2M (`X-RLogix-Service-Token`) → `M2M_NAO_CONFIGURADO` ou token inválido;
+4. `ref` fora de `^[A-Za-z0-9_-]{1,64}$` → 400 `REF_INVALIDO`;
+5. `focusnfe_token` ausente → 400 `FOCUS_TOKEN_AUSENTE`. O token vem **só no
+   corpo**, com o segredo do cofre `focusnfe_homologacao` do tenant enviado
+   pelo MapOne; não há fallback para variável de ambiente. Sai do dicionário
+   com `corpo.pop` e é apagado no `finally`.
+
+**Provider** (`providers/focusnfe_provider.py`):
+- `c2_emitir`, `c2_consultar` e `c2_cancelar` usam o host fixo de homologação
+  (`_c2_host_homologacao`, linha 972) e **nunca leem** `FOCUSNFE_BASE_URL`
+  nem `FOCUSNFE_AMBIENTE`;
+- os GETs dos arquivos usam `allow_redirects=False`;
+- `_c2_sanear_corpo` tira o token, e a forma Basic dele, de qualquer texto que
+  a Focus devolva;
+- o status da resposta só pode ser um dos 6 do contrato (`_C2_STATUS_VALIDOS`:
+  `processando_autorizacao`, `autorizado`, `erro_autorizacao`, `cancelado`,
+  `erro_cancelamento`, `nao_encontrado`). Qualquer outro vira erro contratual,
+  `FOCUS_STATUS_DESCONHECIDO`, e nunca é repassado.
+
+**Resposta:** envelope `{ok, trace_id, status, http_status_focus, chave?,
+numero?, serie?, protocolo?, xml_base64?, pdf_base64?, mensagem?}` com HTTP
+200. Rejeição da Focus é `ok:false` com `status` de erro, não HTTP de erro.
+
+**Testes:** `tests/test_emissao_homologacao.py` (aceite travado por hash, 160
+casos, 316 contando os módulos legados atualizados:
+`test_emissao_bloqueada.py`, `test_focusnfe_preparacao.py`,
+`test_focusnfe_http.py` e `test_manifesto_ciencia.py`). Suíte do FiscalOne:
+741. Handoff: `docs/adr/_handoff/2026-10-07-emissor-fiscal-f2-c2-homologacao.md`.
+
+**Pendências** (do gate, sem bloquear a homologação):
+- nas recusas antecipadas (M2M e `ref`), o `pop` do `focusnfe_token` ainda não
+  rodou. A credencial fica no dicionário da requisição recusada, que não é
+  logado nem repassado. Endurecer: o `pop` passa para a 1ª linha do handler;
+- o FiscalOne do dev ainda não está de pé no Mac: decisão de Marcos (07/10).
+  O processo carrega a própria configuração, que inclui o token de DF-e de
+  produção.
