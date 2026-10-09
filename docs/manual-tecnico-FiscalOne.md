@@ -1380,6 +1380,14 @@ bloqueada:** o health segue com `emissao_producao: false`, e
 `bloquear_emissao` (`app.py:239`) vale para todo o resto. O C2 liga só
 `emissao_homologacao: true`.
 
+**Publicação (09/10/2026, ~16:45; Marcos: *"Execute o Deploy do FiscalOne"*):**
+- até então a VM rodava a `c598ea0`, anterior ao C2;
+- o primeiro Enviar real (OC-0014 da R1, CT-e série 1 nº 1) recebeu 403 `EMISSAO_BLOQUEADA` em
+  `POST /fiscal/cte`;
+- deploy de `e6ac37f`, com backup `FiscalOne_pre_deploy_20261009_164452`;
+- health `emissao_homologacao: true` e `emissao_producao: false`;
+- o `app.py` da VM tem o mesmo SHA-256 do C2.
+
 **Rotas M2M** (`app.py:1684-1706`, corpo comum em `_c2_rota`, `app.py:850`):
 
 | Método e rota | Ação |
