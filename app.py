@@ -926,9 +926,15 @@ def _c2_rota(tipo: str, acao: str, ref_url: str | None = None):
     finally:
         del focusnfe_token
 
+    # cStat e motivo da SEFAZ no log (09/10/2026): sem eles a rejeição do CT-e só
+    # existia na resposta HTTP, e nem ela trazia o motivo.
+    erros = resp.get("erros") if isinstance(resp.get("erros"), list) else []
+    motivo = resp.get("mensagem_sefaz") or next(
+        (e.get("mensagem") for e in erros if isinstance(e, dict) and e.get("mensagem")), None)
     _log_stdout(operacao, "ok" if resp.get("ok") else "erro", trace_id,
-                source_system=source_system,
-                erro_msg=None if resp.get("ok") else f"status={resp.get('status')}")
+                source_system=source_system, cstat=resp.get("status_sefaz"),
+                erro_msg=None if resp.get("ok") else (
+                    f"status={resp.get('status')}" + (f"; {str(motivo)[:300]}" if motivo else "")))
     return jsonify(resp), 200
 
 

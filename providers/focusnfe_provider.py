@@ -958,7 +958,10 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
 # producao e impossivel por desenho aqui, independente de env/override.
 # Token vem sempre do parametro explicito do chamador (app.py), nunca de
 # self._token/env — ver `app.py:_c2_rota`.
-_C2_XML_CAMPO = "caminho_xml_nota_fiscal"
+# CT-e: a consulta devolve `caminho_xml` e `chave` ("CTe" + 44 dígitos) — doc oficial
+# consultar_cte_cte_os, lida em 09/10/2026. NFS-e Nacional: `caminho_xml_nota_fiscal`.
+# Os nomes antigos seguem aceitos (vieram de busca, quando a página não abria).
+_C2_XML_CAMPOS = ("caminho_xml", "caminho_xml_nota_fiscal")
 _C2_PDF_CAMPO = {"cte": "caminho_dacte", "nfsen": "url_danfse"}
 _C2_STATUS_ERRO_POR_ACAO = {
     "emitir":     "erro_autorizacao",
@@ -1053,6 +1056,12 @@ def _c2_mapear_resposta(http_status: int, corpo: dict, acao: str):
     mensagem = (corpo.get("mensagem") or corpo.get("erro")) if isinstance(corpo, dict) else None
     erros = [{"codigo": str(codigo or f"FOCUS_HTTP_{http_status}"),
               "mensagem": str(mensagem or f"FocusNFe respondeu HTTP {http_status}.")}]
+    # Pré-validação (doc emitir_cte): `erros` = [{numero_correcao, erros: [texto]}].
+    for grupo in (corpo.get("erros") if isinstance(corpo, dict) else None) or []:
+        textos = grupo.get("erros") if isinstance(grupo, dict) else None
+        for texto in textos if isinstance(textos, list) else []:
+            erros.append({"codigo": str(codigo or f"FOCUS_HTTP_{http_status}"),
+                          "mensagem": str(texto)})
     if http_status == 404:
         return False, "nao_encontrado", erros
     return False, _C2_STATUS_ERRO_POR_ACAO.get(acao, "erro_autorizacao"), erros
@@ -1067,12 +1076,27 @@ def _c2_envelope(ok: bool, status: str, http_status_focus: int, corpo: dict,
             valor = corpo.get(campo)
             if valor not in (None, ""):
                 env[campo] = valor
-        chave = corpo.get("chave_cte") if tipo == "cte" else corpo.get("chave_acesso")
+        if tipo == "cte":
+            bruta = corpo.get("chave") or corpo.get("chave_cte")
+            digitos = re.sub(r"\D", "", str(bruta or ""))
+            chave = digitos if len(digitos) == 44 else bruta
+        else:
+            chave = corpo.get("chave_acesso")
         if chave:
             env["chave"] = chave
-        mensagem = corpo.get("mensagem")
-        if mensagem:
-            env["mensagem"] = mensagem
+        protocolo = corpo.get("protocolo")
+        if isinstance(protocolo, dict):
+            # `?completa=1`: objeto com `protocolo`, `data_recebimento`, `motivo`.
+            numero_protocolo = protocolo.get("protocolo")
+            if numero_protocolo not in (None, ""):
+                env["protocolo"] = numero_protocolo
+            else:
+                env.pop("protocolo", None)
+        # Motivo da SEFAZ (cStat e xMotivo): autorizado, rejeitado ou cancelado.
+        for campo in ("status_sefaz", "mensagem_sefaz", "mensagem"):
+            valor = corpo.get(campo)
+            if valor not in (None, ""):
+                env[campo] = valor
     if erros:
         env["erros"] = erros
     return env
@@ -2676,8 +2700,10 @@ class FocusNFeProvider(GovProvider):
         """
         url = f"{_c2_host_homologacao()}/v2/{tipo}/{ref}"
         headers = {**_basic_auth_header(token), "Accept": "application/json"}
+        # CT-e: `completa=1` traz o objeto `protocolo` (número, data, motivo).
+        params = {"completa": "1"} if tipo == "cte" else None
         try:
-            resp = requests.get(url, headers=headers, timeout=self._timeout,
+            resp = requests.get(url, params=params, headers=headers, timeout=self._timeout,
                                 allow_redirects=False)
         except requests.exceptions.RequestException:
             return _c2_envelope(
@@ -2690,7 +2716,8 @@ class FocusNFeProvider(GovProvider):
         ok, status, erros = _c2_mapear_resposta(resp.status_code, corpo, "consultar")
         env = _c2_envelope(ok, status, resp.status_code, corpo, trace_id, ref, tipo, erros)
         if status == "autorizado" and isinstance(corpo, dict):
-            xml_b64 = self._c2_baixar_arquivo(corpo.get(_C2_XML_CAMPO), token)
+            caminho_xml = next((corpo.get(c) for c in _C2_XML_CAMPOS if corpo.get(c)), None)
+            xml_b64 = self._c2_baixar_arquivo(caminho_xml, token)
             pdf_b64 = self._c2_baixar_arquivo(corpo.get(_C2_PDF_CAMPO.get(tipo, "")), token)
             if xml_b64:
                 env["xml_base64"] = xml_b64

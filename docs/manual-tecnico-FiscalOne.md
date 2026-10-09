@@ -1388,6 +1388,26 @@ bloqueada:** o health segue com `emissao_producao: false`, e
 - health `emissao_homologacao: true` e `emissao_producao: false`;
 - o `app.py` da VM tem o mesmo SHA-256 do C2.
 
+**Retorno completo pela doc oficial (09/10/2026, gate `CTE-VTOTDFE-RETORNO-20261009`):**
+- **Fonte:** `doc.focusnfe.com.br/reference/consultar_cte_cte_os` e `emitir_cte`. Lidas em
+  09/10; em 06/10 a página do CT-e não abria e os nomes vieram de busca.
+- **Rejeição sem motivo:** a SEFAZ rejeitou o CT-e da OC-0014 (360 e 539), e a tela mostrou
+  "Rejeitado pela Focus" vazio.
+  - A consulta devolve `status_sefaz`, `mensagem_sefaz` e `erros` [{codigo, mensagem}].
+  - O `_c2_envelope` só repassava `mensagem`, que a rejeição da SEFAZ não traz.
+- **Agora o envelope repassa:**
+  - `status_sefaz` e `mensagem_sefaz`;
+  - a lista `erros`;
+  - os textos da pré-validação (`erros` = [{numero_correcao, erros: [texto]}]), achatados em `erros`.
+- **Autorizado no formato oficial:**
+  - `chave` vem como "CTe" + 44 dígitos, e o prefixo é removido;
+  - o XML vem em `caminho_xml`;
+  - a consulta do CT-e vai com `completa=1`, que traz o objeto `protocolo` (o número vai para
+    `protocolo`);
+  - `chave_cte`, `caminho_xml_nota_fiscal` e o protocolo em texto seguem aceitos.
+- **Log:** o `c2_*` grava `cstat` (o `status_sefaz`) e, no erro, o motivo com até 300 caracteres.
+- **Aceite:** `tests/test_c2_retorno_sefaz.py`.
+
 **Rotas M2M** (`app.py:1684-1706`, corpo comum em `_c2_rota`, `app.py:850`):
 
 | Método e rota | Ação |
