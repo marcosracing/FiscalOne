@@ -1408,6 +1408,26 @@ bloqueada:** o health segue com `emissao_producao: false`, e
 - **Log:** o `c2_*` grava `cstat` (o `status_sefaz`) e, no erro, o motivo com até 300 caracteres.
 - **Aceite:** `tests/test_c2_retorno_sefaz.py`.
 
+**XML e DACTE do autorizado (09/10/2026, gate `CTE-CUSTODIA-REDIRECT-20261009`):**
+- **O que aconteceu:** o CT-e nº 4 da OC-0014 foi autorizado (protocolo 135260007168424) e ficou
+  `AUTORIZADO_SEM_CUSTODIA`.
+  - Pelos exemplos da doc oficial, `caminho_xml` e `caminho_dacte` vêm como URL https completa
+    no storage da Focus (`focusnfe.s3.sa-east-1.amazonaws.com`).
+  - O C2 só aceitava o host de homologação e descartava a URL.
+- **Agora `_c2_baixar_arquivo`:**
+  - aceita o storage oficial (`_C2_STORAGE_HOSTS`, mais `FISCALONE_XML_REDIRECT_HOSTS`), só
+    https, sem credencial, porta padrão e sem fragmento;
+  - baixa do storage **sem** o token da API, que segue só para o host de homologação;
+  - segue um redirect apenas para host permitido. Qualquer outro host continua recusado, e o
+    teste travado do redirect hostil segue verde.
+- **Diagnóstico sem URL nem host:**
+  - a consulta devolve `arquivos` = {xml, pdf}, com valores como `ok`, `sem_caminho`,
+    `caminho_fora_da_homologacao`, `redirect_nao_permitido`, `erro_http`, `erro_storage` ou
+    `http_<status>`;
+  - o log `c2_consultar_*` grava esse diagnóstico em `acao`.
+- **No MapOne:** o DACTE do CT-e é gerado a partir do XML custodiado (`dacte.gerar_pdf`). O `pdf_base64`
+  serve à NFS-e Nacional.
+
 **Rotas M2M** (`app.py:1684-1706`, corpo comum em `_c2_rota`, `app.py:850`):
 
 | Método e rota | Ação |

@@ -962,6 +962,10 @@ def _mapear_nfse_focus(item: dict, trace_id: str) -> dict:
 # consultar_cte_cte_os, lida em 09/10/2026. NFS-e Nacional: `caminho_xml_nota_fiscal`.
 # Os nomes antigos seguem aceitos (vieram de busca, quando a página não abria).
 _C2_XML_CAMPOS = ("caminho_xml", "caminho_xml_nota_fiscal")
+# Storage oficial dos arquivos (XML/DACTE) — exemplos da doc consultar_cte_cte_os, lida em
+# 09/10/2026: `caminho_xml` e `caminho_dacte` vêm como URL https completa neste host. Só
+# https, sem credencial; o token da API nunca vai para o storage.
+_C2_STORAGE_HOSTS = frozenset({"focusnfe.s3.sa-east-1.amazonaws.com"})
 _C2_PDF_CAMPO = {"cte": "caminho_dacte", "nfsen": "url_danfse"}
 _C2_STATUS_ERRO_POR_ACAO = {
     "emitir":     "erro_autorizacao",
@@ -1003,6 +1007,27 @@ def _c2_sanear_corpo(corpo, token: str):
             return [_limpa(x) for x in v]
         return v
     return _limpa(corpo)
+
+
+def _c2_url_storage(valor) -> str | None:
+    """URL https completa no storage oficial da Focus (ou em host da allowlist
+    FISCALONE_XML_REDIRECT_HOSTS), sem credencial, porta padrão, sem fragmento.
+    Devolve a URL como veio (a query pode ser a assinatura); senão None."""
+    if not isinstance(valor, str) or not valor.strip():
+        return None
+    v = valor.strip()
+    try:
+        partes = urllib.parse.urlsplit(v)
+        porta = partes.port
+    except (TypeError, ValueError):
+        return None
+    if (partes.scheme.lower() != "https" or not partes.hostname
+            or partes.username is not None or partes.password is not None
+            or partes.fragment or porta not in (None, 443)):
+        return None
+    extra = {h.strip().lower() for h in os.environ.get(_XML_REDIRECT_HOSTS_ENV, "").split(",")
+             if h.strip()}
+    return v if partes.hostname.lower() in (_C2_STORAGE_HOSTS | extra) else None
 
 
 def _c2_url_arquivo_homologacao(valor) -> str | None:
@@ -2646,24 +2671,44 @@ class FocusNFeProvider(GovProvider):
                 pass
 
     # ── C2 homologacao — CT-e / NFS-e Nacional (EM-04/EM-05/EM-06) ─────────
-    def _c2_baixar_arquivo(self, valor, token: str) -> str | None:
-        """Baixa XML/PDF SOMENTE do host fixo de homologacao. Qualquer
-        outro host, scheme != https, ou status HTTP != 200 devolve None —
-        nunca propaga URL/host hostil ao chamador (nem tenta baixar lá)."""
+    def _c2_baixar_arquivo(self, valor, token: str) -> tuple[str | None, str]:
+        """Baixa XML/PDF do host fixo de homologacao e devolve (base64 | None, diagnostico).
+
+        A Focus serve o arquivo por redirect ao storage, outro dominio (o CT-e nº 4 da
+        OC-0014 foi autorizado em 09/10/2026 e ficou sem XML porque o C2 recusava todo
+        redirect). Segue UM redirect, sem Authorization, so para host permitido pela
+        mesma allowlist das NF-e recebidas (`_xml_redirect_location_permitida`: o host
+        de origem mais FISCALONE_XML_REDIRECT_HOSTS). O diagnostico nunca leva URL nem
+        host: "ok", "sem_caminho", "caminho_fora_da_homologacao", "erro_http",
+        "redirect_nao_permitido", "erro_storage" ou "http_<status>"."""
         url = _c2_url_arquivo_homologacao(valor)
+        com_token = url is not None
+        if url is None:
+            # Doc oficial: o arquivo vem como URL completa no storage da Focus.
+            url = _c2_url_storage(valor)
         if not url:
-            return None
-        headers = _basic_auth_header(token)
+            return None, ("caminho_fora_da_homologacao" if isinstance(valor, str) and valor.strip()
+                          else "sem_caminho")
+        headers = _basic_auth_header(token) if com_token else {}
         try:
             resp = requests.get(url, headers=headers, timeout=self._timeout,
                                 allow_redirects=False)
         except requests.exceptions.RequestException:
-            return None
+            return None, "erro_http"
         finally:
             del headers
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = (resp.headers.get("Location") or "").strip()
+            if not location or not (_xml_redirect_location_permitida(location, url)
+                                    or _c2_url_storage(location)):
+                return None, "redirect_nao_permitido"
+            try:
+                resp = requests.get(location, timeout=self._timeout, allow_redirects=False)
+            except requests.exceptions.RequestException:
+                return None, "erro_storage"
         if resp.status_code != 200 or not resp.content:
-            return None
-        return base64.b64encode(resp.content).decode()
+            return None, f"http_{resp.status_code}"
+        return base64.b64encode(resp.content).decode(), "ok"
 
     def c2_emitir(self, tipo: str, ref: str, payload: dict, token: str,
                   trace_id=None) -> dict:
@@ -2717,8 +2762,9 @@ class FocusNFeProvider(GovProvider):
         env = _c2_envelope(ok, status, resp.status_code, corpo, trace_id, ref, tipo, erros)
         if status == "autorizado" and isinstance(corpo, dict):
             caminho_xml = next((corpo.get(c) for c in _C2_XML_CAMPOS if corpo.get(c)), None)
-            xml_b64 = self._c2_baixar_arquivo(caminho_xml, token)
-            pdf_b64 = self._c2_baixar_arquivo(corpo.get(_C2_PDF_CAMPO.get(tipo, "")), token)
+            xml_b64, diag_xml = self._c2_baixar_arquivo(caminho_xml, token)
+            pdf_b64, diag_pdf = self._c2_baixar_arquivo(corpo.get(_C2_PDF_CAMPO.get(tipo, "")), token)
+            env["arquivos"] = {"xml": diag_xml, "pdf": diag_pdf}
             if xml_b64:
                 env["xml_base64"] = xml_b64
             if pdf_b64:
